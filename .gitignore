@@ -1,0 +1,46 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# CachÃ© de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Builds y compilaciones
+build/
+dist/
+_internal/
+dist_versions/
+*.exe
+*.spec
+
+# Datos comerciales reales
+*.csv
+Escaneos/
+
+# Datos de sesiÃ³n / runtime
+auto_save*.json
+ultima_sesion.json
+session_log.txt
+logs/
+*.log
+
+# Licencia y secretos
+core_lib.dat
+license.dat
+.env
+.keys/
+*.pem
+*.key
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Datos de runtime / configuración personal
+auth.json
+runtime_state.json
+config.json
+img/

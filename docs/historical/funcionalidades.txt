@@ -1,0 +1,109 @@
+MANUAL DE FUNCIONALIDADES ABSOLUTO - STOCK MANAGER V3
+
+Este documento es la ÚNICA fuente de verdad para el desarrollo. Contiene cada detalle técnico, de lógica y de interfaz solicitado.
+
+---
+
+1. SEGURIDAD, ACCESO Y LICENCIAS (PROTECCIÓN)
+   - Acceso de Usuario: Pantalla de inicio con contraseña ('CostaNivel23'). Si falla, permite reintentar sin cerrar la app.
+   - Sistema de Licencias ('core_lib.dat'):
+     * Valida fecha de expiración, último uso y 1 día de gracia (Base64 + Hash SHA-256).
+     * Detección de retroceso de reloj: Bloqueo inmediato si 'hoy' < 'último uso'.
+   - Bloqueo por Expiración: Ventana especial que SOLO acepta la 'Contraseña Maestra' para renovar.
+   - Contraseña Maestra (Variable 'e' configurable): Permite renovar 30 días de licencia y acceder a 'Opciones Avanzadas'.
+   - Opciones Avanzadas (Icono Engranaje): 
+     * Pide Contraseña Maestra para abrir.
+     * Configura Velocidad: Caracteres/segundo o Códigos/segundo.
+      * Modo de Pegado: "Tecleo carácter por carácter" o "Simular CTRL+V".
+      * LISTA DE EXCLUSIÓN: Cuadro de texto para agregar códigos que NO deben ser escaneados. Estos se ignorarán durante el proceso de escaneo.
+      * Persistencia: Estos ajustes se guardan en 'config.json'.
+
+2. GESTIÓN DE DATOS E INVENTARIO (DATA LAYER)
+   - Familias Disponibles: AM-AO, AG, AM-AO+AG (Combinado).
+   - Importación Maestro (CSV): 
+     * Formato: Delimitado por ';', codificación latin1.
+     * Copia Automática: El programa copia el CSV elegido a su raíz con nombre 'FAMILIA-Fecha.csv'.
+     * Todos los escaneos deben guardarse en la carpeta "Escaneos" dentro de la carpeta del programa.
+     * Carga Progresiva: Procesa archivos grandes en bloques de 200 para no congelar la UI.
+   - Persistencia de Escaneo (JSON):
+     * El programa usa ÚNICAMENTE JSON para guardar el progreso del escaneo.
+     * AUTO-GUARDADO INTELIGENTE: El programa guarda automáticamente el JSON cada 15 segundos de inactividad tras el último escaneo.
+     * Botón de Guardado: Cambia a ROJO si hay cambios pendientes y a VERDE tras guardar (Auto o Manual).
+   - Recuperación: 
+     * Botón "Cargar Último Stock": Carga automáticamente el JSON y su CSV correspondiente.
+     * Explorador de Historial: Ver y cargar sesiones de fechas anteriores.
+   - Apertura Externa: Botón para abrir el CSV manual con la aplicación predeterminada del sistema.
+
+3. INTERFAZ DE USUARIO (GUI MODERNA - CustomTkinter)
+   - Layout 16:9 (División Lateral): Ventana dividida en dos columnas principales.
+     * COLUMNA IZQUIERDA: Listado de productos ESCANEADOS (Cantidades acumuladas).
+     * COLUMNA DERECHA: Listado Maestro del CSV (Referencia de stock).
+   - Colores de Validación (UX Premium):
+     * Verde: Stock completado (Cantidad escaneada == Cantidad CSV).
+     * Amarillo: Stock pendiente (Cantidad escaneada < Cantidad CSV).
+     * Rosa/Salmón: Sobrante (Cantidad escaneada > Cantidad CSV).
+     * Naranja: Código no existe en el CSV maestro.
+     * Cyan: El código pertenece a otra familia (Bloqueo opcional según configuración).
+   - Sistema de Toasts (Notificaciones):
+     * Mensajes flotantes temporales (no roban foco).
+     * Historial de Toasts: Tras 10s, los toasts se "minimizan" a un panel lateral/esquina. Se pueden revisar y cerrar con una cruz.
+   - Foco Prioritario: El cursor debe volver automáticamente al campo de 'Escanear' después de cada acción (buscar, borrar, etc.).
+
+4. AUDITORÍA Y OPERACIONES (WORKFLOW)
+   - Búsqueda Unificada (F2): Un solo campo que filtra simultáneamente la tabla de Escaneados y la del Maestro CSV.
+   - Gestión de Errores (Ventana de Diferencias):
+     * Ventana secundaria no modal (se puede ver mientras se escanea).
+     * Lista solo discrepancias (Sobrantes/Faltantes).
+     * Tecla Suprimir (Delete): Elimina el registro seleccionado del listado de ESCANEADOS con confirmación.
+     * Restricción: El listado Maestro CSV es INTOCABLE (solo lectura).
+
+5. AUTOMATIZACIÓN (MODO COPIAR / EXPORTAR)
+   - Lógica de Vaciado: Pasa los códigos escaneados a otra ventana/programa.
+   - Pausa Inteligente (F8): 
+     * F8 pausa o reanuda el envío de códigos.
+     * Terminación de Ciclo: Si se presiona F8 durante el envío de un código largo, el programa termina de enviar ESE CÓDIGO completo y luego entra en pausa.
+   - Delay de Inicio: Cuenta regresiva visual (10s por defecto) para permitir al usuario cambiar de ventana.
+
+6. INTEGRACIÓN (GESTIÓN DE IMÁGENES)
+   - Visualización Dinámica: Al hacer doble clic en un código, se muestra su imagen. Si no está descargada, se busca en la web en ese instante.
+   - DESCARGA EN SEGUNDO PLANO (BACKGROUND): 
+     * Al cargar un CSV de stock o escanear nuevos códigos, el programa inicia automaticamente un proceso de fondo para buscar y descargar las imágenes de todos los productos.
+     * Interfaz de Progreso: En la parte superior de la aplicación, junto a los botones, se mostrará un contador en tiempo real indicando `Descargadas/Total - Porcentaje%` (ejemplo: `500/1000 - 50%`).
+     * Prioridad Baja: No interfiere con el escaneo. Se realiza de forma asíncrona.
+     * Persistencia Local: Las imágenes se guardan exclusivamente en la carpeta `/img` del programa (Ruta Fija). Si se borra el programa o se reinstala, se vuelven a descargar automáticamente.
+   - REPOSITORIO Y REPORTE DE ERRORES (Opciones):
+     * Botón de Acceso Directo: En la Ventana de Opciones habrá un botón para abrir rápidamente la carpeta local donde se almacenan todas las imágenes descargadas.
+     * Registro de Fallos: En esa misma ventana, existirá una lista o registro visual con los SKUs que el programa intentó buscar pero NO pudo encontrar en la web de Cellular Center.
+   - APARIENCIA PERSONALIZADA:
+     * Tema Global: Selección entre Oscuro (Dark), Claro (Light) o Sistema.
+     * Colores de Tabla: Capacidad de cambiar el color de Fondo y Fuente de cada estado (Completado, Pendiente, Sobrante, Desconocido) mediante códigos Hexadecimales.
+     * Persistencia Estética: Todos los ajustes visuales se guardan en `config.json` y se aplican en tiempo real al guardar.
+
+7. INTELIGENCIA DE GUARDADO Y AUDITORÍA EN TIEMPO REAL
+   - RECONOCIMIENTO DE PATRONES (SKU Parsing):
+     * El programa interpretará los códigos para agrupar por Tipo y Modelo.
+     * Ejemplo: 'IMPIP13TR' -> IMP (Impacto) | IP13 (iPhone 13) | TR (Transparente).
+     * El usuario podrá definir o confirmar estos grupos para que el programa aprenda qué productos "van juntos".
+   - NOTIFICACIONES DE "PRODUCTO MAL GUARDADO":
+     * Si el programa detecta que se están escaneando muchos productos de un modelo (ej. iPhone 13) y de pronto aparece uno muy distinto (ej. Samsung A52), lanzará una sugerencia visual: "Posible producto mal guardado".
+     * Regla de Proximidad: Si un producto aparece lejos de su "grupo habitual" en el orden de escaneo, el sistema lo marca para revisión.
+   - SUGERENCIAS DE FALTANTES:
+     * Si el escaneo de una "caja" (grupo de modelos similares) termina y el programa detecta en el CSV que hay un producto de ese mismo grupo que NO se escaneó, notificará: "Falta escanear [Modelo] que suele estar en esta caja".
+
+8. OPERACIONES RÁPIDAS (QR Y ATAJOS)
+   - QR DE BORRADO:
+     * El programa permitirá generar/imprimir un código QR que, al ser escaneado por el lector de mano, ELIMINE automáticamente el último código registrado.
+     * Ideal para corregir errores rápidamente sin soltar el escaneo.
+   - Limitación Técnica: Debido a los hashes dinámicos del CDN de Cellular Center, el programa realiza una búsqueda por SKU para obtener la URL real antes de descargar.
+
+---
+
+NOTAS DE ARQUITECTURA:
+- Framework: CustomTkinter.
+- Modularización: Separar Seguridad (auth.py), Datos (inventory.py), Automatización (automation.py) y GUI (gui/).
+- Requisito: Instalación de dependencias (customtkinter, pynput, pyperclip, pillow, requests).
+
+9. EMPAQUETADO Y DISTRIBUCIÓN
+   - Formato Final: El programa se compilará en un único archivo `.exe` usando PyInstaller.
+   - Recursos Embebidos: El `.exe` incluirá el icono, el tema de CustomTkinter y las dependencias.
+   - Carpeta `/img`: Las imágenes descargadas se mantendrán en una carpeta externa al `.exe` para persistencia entre versiones.

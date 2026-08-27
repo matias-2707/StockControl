@@ -17,6 +17,9 @@ import traceback
 import threading
 import time
 import json
+import queue
+
+from src.core.scanpipeline import ScanWorker
 
 class StockApp(ctk.CTk):
     def __init__(self):
@@ -53,7 +56,17 @@ class StockApp(ctk.CTk):
         current_config["parent_app"] = self
         self.command_delete_available = True
         self.windows = {} # Seguimiento de ventanas
-        
+
+        # --- FASE A: Pipeline de escaneo desacoplado (recepción -> cola -> worker -> UI) ---
+        self.scan_queue = queue.Queue()          # FIFO, sin límite artificial
+        self.result_queue = queue.Queue()        # Resultados del worker hacia la UI
+        self._worker_stop = threading.Event()    # Señal de cierre ordenado
+        self._scan_worker = ScanWorker(self.inventory, self.scan_queue, self.result_queue, self._worker_stop)
+        self._worker_thread = threading.Thread(target=self._scan_worker.run, daemon=True)
+        self._worker_thread.start()
+        self.after(60, self._poll_results)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self._load_icons()
         self.bind("<F3>", lambda e: self._toggle_diff_window())
         self.after(200, self._perform_initial_auth)
@@ -78,8 +91,7 @@ class StockApp(ctk.CTk):
 
     def _on_image_progress(self, downloaded, total):
         """Callback llamado desde el worker-thread del ImageManager para actualizar UI."""
-        self.after(0, self._update_img_progress_ui, downloaded, total)
-        
+        self.after(0, self._update_img_progress_ui, downloaded, total)        
     def _update_img_progress_ui(self, downloaded, total):
         """Actualiza el label del Header en el hilo principal."""
         if hasattr(self, 'lbl_img_progress') and self.lbl_img_progress.winfo_exists():
@@ -92,6 +104,61 @@ class StockApp(ctk.CTk):
                     self.lbl_img_progress.configure(text=f"Imágenes: {downloaded}/{total} - 100%", text_color="#28a745")
             else:
                 self.lbl_img_progress.configure(text="", text_color="white")
+
+    def _on_close(self):
+        """Cierre ordenado: detiene el worker antes de destruir la ventana.
+        Evita que un thread secundario siga trabajando sobre una UI destruida.
+        """
+        self._worker_stop.set()
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+    def _poll_results(self):
+        """Único puente worker -> UI: consume result_queue en el hilo principal.
+        - Muestra toasts (show_toast solo desde aquí para el pipeline).
+        - Coalesce refrescos: una ráfaga produce UNA reconstrucción de UI.
+        - Mantiene autoscroll hacia el último escaneo ("Último arriba"/"Último abajo").
+        """
+        try:
+            if not self.winfo_exists():
+                return
+            has_refresh = False
+            last_sku = None
+            while True:
+                try:
+                    res = self.result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                rtype = res.get("type")
+                if rtype == "toast":
+                    self.show_toast(
+                        res.get("msg", ""),
+                        mtype=res.get("mtype", "info"),
+                        duration=res.get("duration", 3000),
+                        use_history=res.get("use_history", True),
+                        metadata=res.get("metadata"),
+                    )
+                elif rtype == "refresh":
+                    has_refresh = True
+                    last_sku = res.get("sku")
+
+            if has_refresh:
+                self._update_all_ui()
+                # Autoscroll al último escaneado (comportamiento V8 actual)
+                children = self.scanned_table.tree.get_children()
+                if children:
+                    target_row = children[0] if self.sort_var.get() == "Último arriba" else children[-1]
+                    self.scanned_table.tree.see(target_row)
+                # Sincronización a tabla maestra si está activa (comportamiento V8 actual)
+                if self.sync_active.get() and last_sku and not self.inventory.is_qr_code(last_sku):
+                    self._sync_to_master(last_sku)
+
+            self.after(60, self._poll_results)
+        except Exception:
+            # Ventana destruida o Tk cerrado: no reintentar
+            pass
 
     def _perform_initial_auth(self):
         if self.auth.check_license():
@@ -319,12 +386,16 @@ class StockApp(ctk.CTk):
         self._refresh_tables()
 
     def _on_scan_event(self, event):
+        """FASE A: camino crítico mínimo.
+        Recibe -> registra -> encola -> limpia -> foco.
+        TODO lo demás (proximidad, sobrantes, avisos, refresco UI) corre en el worker/poll.
+        """
         sku = self.scan_entry.get().strip().upper()
         self.scan_entry.delete(0, "end")
         if not sku:
             return
         
-        # Comando textual de borrado
+        # Comando textual de borrado (comportamiento V8 intacto)
         if sku == "ELIMINAR":
             if not self.command_delete_available:
                 self.show_toast("No se puede borrar más de un ítem consecutivamente.", mtype="warning", duration=3000)
@@ -342,72 +413,55 @@ class StockApp(ctk.CTk):
             return
 
         is_qr = self.inventory.is_qr_code(sku)
-        if not is_qr:
-            # Avisos de Familia
-            if sku not in self.inventory.full_family_map:
-                self.show_toast(f"¡ATENCIÓN! {sku} no pertenece al listado de stock.", mtype="error", duration=10000, use_history=False)
-            else:
-                res_fam = self.inventory.full_family_map.get(sku, "")
+
+        # Validación de familia: es DECISIÓN DE REGISTRO (rápida, O(1)) -> queda aquí.
+        # Los toasts asociados se encolan (no bloquean).
+        if not is_qr and self.family_type != "COMBINED":
+            res_fam = self.inventory.full_family_map.get(sku, "")
+            is_correct = False
+            if self.family_type == "AM_AO" and (res_fam.startswith("AM") or res_fam.startswith("AO")):
                 is_correct = True
-                if self.family_type != "COMBINED":
-                    is_correct = False
-                    if self.family_type == "AM_AO" and (res_fam.startswith("AM") or res_fam.startswith("AO")):
-                        is_correct = True
-                    elif self.family_type == "AG" and res_fam.startswith("AG"):
-                        is_correct = True
-                    
-                    if not is_correct:
-                        self.show_toast(f"¡AVISO! {sku} es de familia: {res_fam}", mtype="warning", duration=10000, use_history=False)
-                        return
+            elif self.family_type == "AG" and res_fam.startswith("AG"):
+                is_correct = True
+            if not is_correct:
+                self.result_queue.put({
+                    "type": "toast", "mtype": "warning",
+                    "msg": f"¡AVISO! {sku} es de familia: {res_fam}",
+                    "duration": 10000, "use_history": False,
+                })
+                self.scan_entry.focus_set()
+                return
 
         result = self.inventory.add_item(sku)
         if result:
-            self.btn_save.configure(fg_color="#dc3545") 
-            
+            self.btn_save.configure(fg_color="#dc3545")
+
             if result.get("excluded"):
                 self.last_code_label.configure(text="EXCLUIDO", text_color="orange")
             else:
                 self.last_code_label.configure(text=sku, text_color="#3a7ebf")
-                
+
                 if result.get("replaced"):
-                    self.show_toast(f"QR Reemplazado: {result['old_sku']} -> {sku}", mtype="success", duration=3000, use_history=False)
+                    self.result_queue.put({
+                        "type": "toast", "mtype": "success",
+                        "msg": f"QR Reemplazado: {result['old_sku']} -> {sku}",
+                        "duration": 3000, "use_history": False,
+                    })
                     self.status_label.configure(text=f"QR Reemplazado: {sku}")
                 else:
                     self.status_label.configure(text=f"Escaneado: {sku} ({result['fam']})")
-                
-                # Validaciones fuera del camino crítico (V8)
-                if not is_qr:
-                    prox_result = self.inventory.check_proximity(sku, result['pos'])
-                    if prox_result:
-                        # Contar cuántas unidades del SKU están afectadas en este contenedor (V8 - Notificación Agrupada)
-                        curr_c = prox_result['current_container']
-                        affected_count = sum(
-                            1 for i, c in enumerate(self.inventory.scan_sequence)
-                            if c == sku and self.inventory.get_containers_for_index(self.inventory.scan_sequence, i)[0] == curr_c
-                        )
-                        unit_str = f" ({affected_count} unidades)" if affected_count > 1 else ""
-                        self.show_toast(
-                            f"¡Cuidado! {sku}{unit_str} fuera de orden inmediato. Escaneado en {curr_c} pero pertenece a {prox_result['expected_container']}",
-                            mtype="error", duration=10000, use_history=True, metadata=prox_result
-                        )
-                    
-                    expected = self.inventory.original_quantities.get(sku, 0)
-                    scanned_list = self.inventory.scanned_items.get(sku, [])
-                    if expected > 0 and len(scanned_list) > expected:
-                        self.show_toast(f"¡SOBRANTE! {sku} tiene {len(scanned_list)} unidades (Esperado: {expected})", mtype="warning", duration=10000, use_history=False)
 
-                self._update_all_ui()
+                # Encolar para procesamiento secundario (worker FIFO)
+                self.scan_queue.put({
+                    "sku": sku,
+                    "pos": result["pos"],
+                    "fam": result.get("fam"),
+                    "ts": time.time(),
+                    "replaced": result.get("replaced", False),
+                    "is_qr": is_qr,
+                })
                 self.command_delete_available = True
-                
-                # Auto-scroll y foco constante en el último escaneado
-                children = self.scanned_table.tree.get_children()
-                if children:
-                    target_row = children[0] if self.sort_var.get() == "Último arriba" else children[-1]
-                    self.scanned_table.tree.see(target_row)
 
-                if self.sync_active.get() and not is_qr:
-                    self._sync_to_master(sku)
-        
         self.scan_entry.focus_set()
 
     def _update_all_ui(self):

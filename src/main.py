@@ -1613,8 +1613,8 @@ class StockApp(ctk.CTk):
         btn_find.pack(pady=10)
 
     def _move_selected_up(self):
-        if self.sort_var.get() != "Escaneo":
-            self.show_toast("Reordenamiento solo disponible en orden de Escaneo.", mtype="warning", duration=2000, use_history=False)
+        if self.sort_var.get() not in ("Último arriba", "Último abajo"):
+            self.show_toast("Reordenamiento solo disponible en modos secuenciales.", mtype="warning", duration=2000, use_history=False)
             return
         selected = self.scanned_table.tree.selection()
         if not selected: return
@@ -1625,21 +1625,24 @@ class StockApp(ctk.CTk):
         pos = int(pos_str)
         idx = pos - 1
         
-        if idx > 0:
-            if self.inventory.move_item_in_sequence(idx, idx - 1):
+        reverse = self.sort_var.get() == "Último arriba"
+        target = idx + 1 if reverse else idx - 1
+        
+        if 0 <= target < len(self.inventory.scan_sequence):
+            if self.inventory.move_item_in_sequence(idx, target):
                 self._update_all_ui()
-                new_pos_str = str(pos - 1)
+                new_pos_str = str(target + 1)
                 for item in self.scanned_table.tree.get_children():
                     if self.scanned_table.tree.item(item, "text") == new_pos_str:
                         self.scanned_table.tree.selection_set(item)
                         self.scanned_table.tree.see(item)
                         break
-                moved_sku = self.inventory.scan_sequence[idx - 1]
-                self._schedule_deferred_validation(moved_sku, idx)
+                moved_sku = self.inventory.scan_sequence[target]
+                self._schedule_deferred_validation(moved_sku, target + 1)
 
     def _move_selected_down(self):
-        if self.sort_var.get() != "Escaneo":
-            self.show_toast("Reordenamiento solo disponible en orden de Escaneo.", mtype="warning", duration=2000, use_history=False)
+        if self.sort_var.get() not in ("Último arriba", "Último abajo"):
+            self.show_toast("Reordenamiento solo disponible en modos secuenciales.", mtype="warning", duration=2000, use_history=False)
             return
         selected = self.scanned_table.tree.selection()
         if not selected: return
@@ -1650,17 +1653,20 @@ class StockApp(ctk.CTk):
         pos = int(pos_str)
         idx = pos - 1
         
-        if idx < len(self.inventory.scan_sequence) - 1:
-            if self.inventory.move_item_in_sequence(idx, idx + 1):
+        reverse = self.sort_var.get() == "Último arriba"
+        target = idx - 1 if reverse else idx + 1
+        
+        if 0 <= target < len(self.inventory.scan_sequence):
+            if self.inventory.move_item_in_sequence(idx, target):
                 self._update_all_ui()
-                new_pos_str = str(pos + 1)
+                new_pos_str = str(target + 1)
                 for item in self.scanned_table.tree.get_children():
                     if self.scanned_table.tree.item(item, "text") == new_pos_str:
                         self.scanned_table.tree.selection_set(item)
                         self.scanned_table.tree.see(item)
                         break
-                moved_sku = self.inventory.scan_sequence[idx + 1]
-                self._schedule_deferred_validation(moved_sku, idx + 2)
+                moved_sku = self.inventory.scan_sequence[target]
+                self._schedule_deferred_validation(moved_sku, target + 1)
 
     def _setup_drag_and_drop(self):
         tree = self.scanned_table.tree
@@ -1670,7 +1676,7 @@ class StockApp(ctk.CTk):
         tree.tag_configure("drag_target", background="#0078d7", foreground="white")
         
         def on_press(event):
-            if self.sort_var.get() != "Escaneo":
+            if self.sort_var.get() not in ("Último arriba", "Último abajo"):
                 return
             item = tree.identify_row(event.y)
             if item:
@@ -1768,8 +1774,8 @@ class StockApp(ctk.CTk):
         curr_c = meta["current_container"]
         exp_c = meta["expected_container"]
         
-        # 1. Seleccionar el producto en el listado de escaneados en modo "Escaneo"
-        self.sort_var.set("Escaneo")
+        # 1. Seleccionar el producto en el listado de escaneados en modo "Último arriba"
+        self.sort_var.set("Último arriba")
         self._update_all_ui()
         
         pos_str = str(pos)

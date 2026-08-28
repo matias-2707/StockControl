@@ -35,6 +35,8 @@ license.dat
 *.pem
 *.key
 
+*.p12
+*.pfx
 # Archivos del sistema
 .DS_Store
 Thumbs.db

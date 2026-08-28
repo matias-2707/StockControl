@@ -112,12 +112,22 @@ class ScanWorker:
 
                 if event.get("is_qr"):
                     # Los QRs estructurales no generan alertas, solo refresco
-                    self.result_queue.put({"type": "refresh", "sku": sku})
+                    self.result_queue.put({
+                        "type": "refresh", "sku": sku, "pos": pos,
+                        "is_qr": True,
+                        "replaced": event.get("replaced", False),
+                        "old_sku": event.get("old_sku"),
+                    })
                 else:
                     alerts = compute_scan_alerts(self.inventory, sku, pos, fam)
                     for alert in alerts:
                         self.result_queue.put(alert)
-                    self.result_queue.put({"type": "refresh", "sku": sku})
+                    self.result_queue.put({
+                        "type": "refresh", "sku": sku, "pos": pos,
+                        "is_qr": False,
+                        "replaced": event.get("replaced", False),
+                        "old_sku": event.get("old_sku"),
+                    })
             except Exception as e:
                 # Un error jamás mata al worker ni detiene la cola
                 try:

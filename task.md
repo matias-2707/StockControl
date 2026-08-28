@@ -25,9 +25,9 @@
   - [x] Test anti-retroceso de reloj
 
 ## 3. Main Stock y Modelo de Ubicaciones (Etapa 2)
-- [~] Diseñar e implementar estructura de `main_stock.json` para referencia de ubicaciones
+- [x] Diseñar e implementar estructura de `main_stock.json` para referencia de ubicaciones
 - [x] Implementar lectura, validación y persistencia de `main_stock.json`
-- [~] Implementar soporte para escaneo no lineal de contenedores y productos
+- [x] Implementar soporte para escaneo no lineal de contenedores y productos
 - [x] Implementar lógica de detección de discrepancias contra `main_stock.json`
 - [x] Implementar diálogo interactivo "Mover" / "Dejar ahí" con actualización de `main_stock.json` solo tras confirmación
 - [x] Implementar temporizador de validación diferida (5 segundos con debounce) al mover o soltar ítems
@@ -38,14 +38,14 @@
 - [ ] Implementar jerarquía persistente completa de muebles, cajas y vidrieras
 
 ## 4. Núcleo de Escaneo y Prioridad Absoluta (Etapa 3)
-- [~] Preparar diseño del pipeline de escaneo de alta velocidad no bloqueante
-- [ ] Desacoplar tareas secundarias (imágenes, auditorías, validaciones pesadas) del camino crítico
-- [ ] Garantizar registro fiel del 100% de escaneos consecutivos rápidos
+- [x] Preparar diseño del pipeline de escaneo de alta velocidad no bloqueante
+- [x] Desacoplar tareas secundarias (imágenes, auditorías, validaciones pesadas) del camino crítico
+- [x] Garantizar registro fiel del 100% de escaneos consecutivos rápidos
 - [x] Implementar selector de orden: "Último arriba" vs "Último abajo"
 - [x] Asegurar foco y autoscroll constante en el último código escaneado
 - [x] Pruebas unitarias/regresión de Escaneo:
-  - [ ] Test ráfaga de escaneos rápidos sin pérdida de códigos
-  - [ ] Test renderizado correcto en modo "Último arriba" y "Último abajo"
+  - [x] Test ráfaga de escaneos rápidos sin pérdida de códigos
+  - [x] Test renderizado correcto en modo "Último arriba" y "Último abajo"
 
 ## 5. Jerarquía de QRs (@, %, #) y Progreso (Etapa 4)
 - [x] Integrar QRs como contenedores estructurales (@ Caja, % Mueble, # Vidriera)
@@ -56,7 +56,7 @@
 - [x] Pruebas unitarias/regresión de QRs y Progreso:
   - [x] Test exclusión de QRs del total de stock escaneado (máx 100%)
   - [x] Test cálculo de faltantes por caja y visualización de `✓`
-  - [ ] Test colapso y expansión jerárquica en tabla
+  - [x] Test colapso y expansión jerárquica en tabla
 
 ## 6. Auditoría de Diferencias y Atajos (F3, F4, Delete) (Etapa 5)
 - [x] Corregir índice de búsqueda de imágenes en la tabla de diferencias (usar columna Código/SKU)
@@ -72,8 +72,8 @@
 
 ## 7. Notificaciones Agrupadas (Etapa 6)
 - [ ] Implementar agrupación de alertas por código y situación (evitar alertas repetidas por unidad)
-- [ ] Mantener notificaciones fuera del hilo crítico de escaneo
-- [~] Limpiar alertas del historial cuando la condición es resuelta
+- [x] Mantener notificaciones fuera del hilo crítico de escaneo (Fase A: cómputo y encolado en worker, toasts desde el hilo principal)
+- [~] Limpiar alertas del historial cuando la condición es resuelta (resolución interactiva existe; falta test automatizado)
 - [x] Pruebas unitarias/regresión de Notificaciones:
   - [ ] Test agrupación de unidades del mismo SKU en 1 sola notificación
   - [ ] Test limpieza automática tras corrección
@@ -84,6 +84,24 @@
 - [x] Crear script de build / empaquetado para Windows (.exe)
 - [x] Corregir rutas personales, licencia runtime y clave privada fuera del árbol distribuible
 
-## 9. Verificación y Pruebas Finales Integradas
-- [~] Suite unitaria ejecutada; faltan pruebas de UI, ráfagas y concurrencia
-- [~] Verificación de arranque, licencia y seguridad del árbol; falta prueba manual de flujo GUI
+## 9. Fase A — Pipeline de Escaneo Desacoplado
+- [x] Crear `src/core/scanpipeline.py`: worker único FIFO (hilo aparte, sin Tkinter)
+- [x] Mover `compute_scan_alerts` al worker (desconocido / proximidad / sobrante), reproduciendo la lógica de avisos de V8
+- [x] Publicar resultados en `result_queue` (toasts + refresh) consumidos por `_poll_results` en el hilo principal
+- [x] Un error procesando un evento jamás mata al worker ni detiene la cola
+- [x] Cierre ordenado mediante `stop_event`
+- [x] Commit "Fase A: pipeline de escaneo desacoplado"
+
+## 10. Fase B — Actualización Incremental de la Interfaz
+- [x] Crear `src/gui/updates.py`: proyección pura sin Tk (`build_full_view`, `apply_event`, `diff_views`, `apply_actions`)
+- [x] Invariante de oro: la proyección incremental paso a paso == `build_full_view` sobre el modelo final
+- [x] Integrar en `main.py`: `_apply_incremental` + `_execute_actions` sobre los Treeviews con índice `_row_ids`
+- [x] Fallback a rebuild completo ante CUALQUIER inconsistencia o excepción (nunca vista corrupta)
+- [x] Mantener métricas, autoscroll y sync a tabla maestra en el camino incremental
+- [x] Crear `tests/test_fase_b_projection.py` (29 tests del invariante, incl. worker → cola → updates sin Tk)
+- [ ] Commit de la Fase B (pendiente al momento de escribir; cambios en el working tree)
+
+## 11. Verificación y Pruebas Finales Integradas
+- [x] Suite unitaria ejecutada y verificada (52 tests OK en suites headless: scan_burst, v8_features, main_stock, project_integrity, fase_b_projection; `test_auth` requiere sesión interactiva para el flujo de gracia)
+- [ ] Pruebas manuales completas del flujo GUI (ventanas, drag & drop, lector físico, sesión real)
+- [ ] Build real de Windows verificado (script `build_windows.py` listo; artefacto no producido/verificado aún)

@@ -20,6 +20,14 @@ import json
 import queue
 
 from src.core.scanpipeline import ScanWorker
+from src.gui.updates import (
+    ViewOptions,
+    build_full_view,
+    apply_event,
+    TABLE_SCANNED,
+    TABLE_MASTER,
+    TABLE_DIFF,
+)
 
 class StockApp(ctk.CTk):
     def __init__(self):
@@ -51,6 +59,10 @@ class StockApp(ctk.CTk):
         self.collapsed_containers = set() # Contenedores QR plegados/colapsados (V8)
         self.active_grouped_alerts = {}   # Registro de alertas agrupadas por código
         self._excluded_from_export = set()
+
+        # --- FASE B: estado de vista proyectado (updates.py) ---
+        self._view = None  # ScanView actual: fuente visual única
+        self._row_ids = {TABLE_SCANNED: {}, TABLE_MASTER: {}, TABLE_DIFF: {}}  # key -> item_id
         
         # Inyectar referencia de la app en config para el AutomationManager
         current_config["parent_app"] = self
@@ -118,13 +130,14 @@ class StockApp(ctk.CTk):
     def _poll_results(self):
         """Único puente worker -> UI: consume result_queue en el hilo principal.
         - Muestra toasts (show_toast solo desde aquí para el pipeline).
-        - Coalesce refrescos: una ráfaga produce UNA reconstrucción de UI.
+        - FASE B: los refrescos se aplican de forma INCREMENTAL (updates.py);
+          una ráfaga produce inserciones puntuales, no una reconstrucción.
         - Mantiene autoscroll hacia el último escaneo ("Último arriba"/"Último abajo").
         """
         try:
             if not self.winfo_exists():
                 return
-            has_refresh = False
+            refresh_events = []
             last_sku = None
             while True:
                 try:
@@ -141,11 +154,11 @@ class StockApp(ctk.CTk):
                         metadata=res.get("metadata"),
                     )
                 elif rtype == "refresh":
-                    has_refresh = True
+                    refresh_events.append(res)
                     last_sku = res.get("sku")
 
-            if has_refresh:
-                self._update_all_ui()
+            if refresh_events:
+                self._apply_incremental(refresh_events)
                 # Autoscroll al último escaneado (comportamiento V8 actual)
                 children = self.scanned_table.tree.get_children()
                 if children:
@@ -377,13 +390,18 @@ class StockApp(ctk.CTk):
         self._setup_drag_and_drop()
         self.scan_entry.focus_set()
 
+        # FASE B: la vista proyectada arranca consistente con las tablas vacías.
+        # (En carga de sesión, _load_saved_session llama _update_all_ui() después.)
+        self._view = build_full_view(self.inventory, self._view_options())
+        self._row_ids = {TABLE_SCANNED: {}, TABLE_MASTER: {}, TABLE_DIFF: {}}
+
     def _on_sort_changed(self, new_val=None):
         mode = self.sort_var.get()
         if mode == "Último arriba":
             self.inventory.config["list_order"] = "top"
         elif mode == "Último abajo":
             self.inventory.config["list_order"] = "bottom"
-        self._refresh_tables()
+        self._update_all_ui()
 
     def _on_scan_event(self, event):
         """FASE A: camino crítico mínimo.
@@ -459,38 +477,178 @@ class StockApp(ctk.CTk):
                     "ts": time.time(),
                     "replaced": result.get("replaced", False),
                     "is_qr": is_qr,
+                    "old_sku": result.get("old_sku"),
                 })
                 self.command_delete_available = True
 
         self.scan_entry.focus_set()
 
     def _update_all_ui(self):
-        # Excluir QRs de las métricas de stock físico (V8 - Requisito 13)
-        scanned_count = sum(len(p) for code, p in self.inventory.scanned_items.items() if not self.inventory.is_qr_code(code))
-        expected_count = sum(self.inventory.original_quantities.values())
-        diff = scanned_count - expected_count
-        
-        # Contador visual de diferencias relevantes (V8 - Requisito 18: códigos desconocidos + sobrantes)
-        unlisted = sum(len(p) for code, p in self.inventory.scanned_items.items() if not self.inventory.is_qr_code(code) and code not in self.inventory.full_family_map)
-        excess = sum(max(0, len(p) - self.inventory.original_quantities.get(code, 0)) for code, p in self.inventory.scanned_items.items() if not self.inventory.is_qr_code(code) and self.inventory.original_quantities.get(code, 0) > 0)
-        relevant_diffs = unlisted + excess
-        
-        self.lbl_scanned.configure(text=f"Escaneado: {scanned_count}")
-        self.lbl_expected.configure(text=f"Esperado: {expected_count}")
-        
-        color = "#28a745" if diff > 0 else ("#dc3545" if diff < 0 else "white")
-        self.lbl_net_diff.configure(text=f"Dif. Neta: {diff}", text_color=color)
-        
-        # Contador de incidencias
-        rel_color = "#28a745" if relevant_diffs == 0 else ("#ffa500" if relevant_diffs < 5 else "#dc3545")
-        self.lbl_relevant_diffs.configure(text=f"Incidencias: {relevant_diffs}", text_color=rel_color)
+        """Rebuild COMPLETO del estado visual (acciones discretas del usuario).
 
-        percent = (scanned_count / expected_count * 100) if expected_count > 0 else 0
-        self.progress_bar.set(min(1.0, percent / 100))
-        self.lbl_percent.configure(text=f"({percent:.1f}%)")
+        Pasa por la misma proyección de updates.py que el camino incremental:
+        la vista (self._view) y los índices (self._row_ids) quedan consistentes
+        con las tablas pintadas, de modo que el siguiente incremental parte
+        de un estado correcto.
+        """
+        self._rebuild_view_state()
+        self._update_metrics_labels(self._view.metrics)
 
-        self._refresh_tables()
-        self._refresh_diff_window()
+    # ------------------------------------------------------------------
+    # FASE B: proyección de vista (updates.py) — aplicador Tk
+    # ------------------------------------------------------------------
+
+    def _view_options(self):
+        """Opciones de vista desde el estado de la app (orden, colapso, exclusión)."""
+        return ViewOptions(
+            sort_mode=self.sort_var.get(),
+            collapsed_containers=frozenset(self.collapsed_containers),
+            excluded_from_export=frozenset(self._excluded_from_export),
+            location_resolver=self.get_possible_location,
+        )
+
+    def _rebuild_view_state(self):
+        """Pinta las tres tablas completas desde build_full_view y registra
+        los índices key -> item_id que usa el incremental."""
+        opts = self._view_options()
+        new_view = build_full_view(self.inventory, opts)
+        self._view = new_view
+        self._row_ids = {TABLE_SCANNED: {}, TABLE_MASTER: {}, TABLE_DIFF: {}}
+
+        # Tabla escaneada
+        self.scanned_table.clear()
+        for row in new_view.scanned:
+            item = self.scanned_table.tree.insert("", "end", values=row.values, text=row.text or "")
+            self._row_ids[TABLE_SCANNED][row.key] = item
+            self.scanned_table.set_row_style(item, row.colors, bold=row.bold)
+
+        # Tabla maestra
+        self.master_table.clear()
+        for row in new_view.master:
+            item = self.master_table.tree.insert("", "end", values=row.values)
+            self._row_ids[TABLE_MASTER][row.key] = item
+            self.master_table.set_row_color(item, row.colors)
+
+        # Ventana de diferencias (solo si está abierta)
+        if self._diff_window_open():
+            self._sync_diff_table_from(new_view)
+
+    def _update_metrics_labels(self, m):
+        """Pinta los labels del panel resumen desde un objeto Metrics."""
+        self.lbl_scanned.configure(text=f"Escaneado: {m.scanned_count}")
+        self.lbl_expected.configure(text=f"Esperado: {m.expected_count}")
+
+        color = "#28a745" if m.diff_net > 0 else ("#dc3545" if m.diff_net < 0 else "white")
+        self.lbl_net_diff.configure(text=f"Dif. Neta: {m.diff_net}", text_color=color)
+
+        rel_color = "#28a745" if m.relevant_diffs == 0 else ("#ffa500" if m.relevant_diffs < 5 else "#dc3545")
+        self.lbl_relevant_diffs.configure(text=f"Incidencias: {m.relevant_diffs}", text_color=rel_color)
+
+        self.progress_bar.set(min(1.0, m.percent / 100))
+        self.lbl_percent.configure(text=f"({m.percent:.1f}%)")
+
+    def _apply_incremental(self, events):
+        """Aplica una tanda de refrescos de forma incremental.
+
+        Cada evento se resuelve contra el modelo (fuente de verdad) vía
+        updates.apply_event y las acciones resultantes se ejecutan sobre
+        los Treeviews. Ante CUALQUIER inconsistencia o excepción:
+        fallback a rebuild completo (nunca una vista potencialmente incorrecta).
+        """
+        opts = self._view_options()
+        view = self._view
+        try:
+            for ev in events:
+                view, actions = apply_event(view, ev, self.inventory, opts)
+                self._execute_actions(actions)
+            self._view = view
+            self._update_metrics_labels(view.metrics)
+        except Exception:
+            traceback.print_exc()
+            self._update_all_ui()
+
+    def _execute_actions(self, actions):
+        """Traduce acciones (insert/update/delete/move) a operaciones Tk.
+
+        Misma semántica que updates.apply_actions (deletes -> updates ->
+        moves -> inserts). Si la ventana de diferencias está cerrada, sus
+        acciones se descartan: la vista de datos se actualiza igual y la
+        ventana se sincroniza al abrir (_sync_diff_table).
+        """
+        diff_open = self._diff_window_open()
+
+        for a in actions:
+            if a.op == "delete" and (a.table != TABLE_DIFF or diff_open):
+                item = self._row_ids[a.table].pop(a.key, None)
+                if item is not None:
+                    try:
+                        self._tree_for(a.table).delete(item)
+                    except Exception:
+                        pass
+
+        for a in actions:
+            if a.op == "update" and (a.table != TABLE_DIFF or diff_open):
+                item = self._row_ids[a.table].get(a.key)
+                if item is None:
+                    raise KeyError(f"update sin fila registrada: {a.table}:{a.key}")
+                self._apply_row(a.table, item, a.row)
+
+        for a in actions:
+            if a.op == "move" and (a.table != TABLE_DIFF or diff_open):
+                item = self._row_ids[a.table].get(a.key)
+                if item is None:
+                    raise KeyError(f"move sin fila registrada: {a.table}:{a.key}")
+                self._tree_for(a.table).move(item, "", a.index)
+
+        for a in sorted((x for x in actions if x.op == "insert"), key=lambda x: x.index):
+            if a.table == TABLE_DIFF and not diff_open:
+                continue
+            tree = self._tree_for(a.table)
+            item = tree.insert("", a.index, values=a.row.values, text=a.row.text or "")
+            self._row_ids[a.table][a.key] = item
+            self._apply_row_style(a.table, item, a.row)
+
+    def _apply_row(self, table, item, row):
+        tree = self._tree_for(table)
+        tree.item(item, values=row.values, text=row.text or "")
+        self._apply_row_style(table, item, row)
+
+    def _apply_row_style(self, table, item, row):
+        if table == TABLE_SCANNED:
+            self.scanned_table.set_row_style(item, row.colors, bold=row.bold)
+        else:
+            self._table_widget(table).set_row_color(item, row.colors)
+
+    def _table_widget(self, table):
+        if table == TABLE_SCANNED:
+            return self.scanned_table
+        if table == TABLE_MASTER:
+            return self.master_table
+        return self.windows["diff_table"]
+
+    def _tree_for(self, table):
+        return self._table_widget(table).tree
+
+    def _diff_window_open(self):
+        return (
+            "diff" in self.windows
+            and self.windows["diff"].winfo_exists()
+            and "diff_table" in self.windows
+            and self.windows["diff_table"].winfo_exists()
+        )
+
+    def _sync_diff_table(self):
+        """Llena la ventana de diferencias recién abierta desde la vista actual."""
+        self._sync_diff_table_from(self._view)
+
+    def _sync_diff_table_from(self, view):
+        table = self.windows["diff_table"]
+        table.clear()
+        self._row_ids[TABLE_DIFF] = {}
+        for row in view.diff:
+            item = table.tree.insert("", "end", values=row.values)
+            self._row_ids[TABLE_DIFF][row.key] = item
+            table.set_row_color(item, row.colors)
 
     def _refresh_tables(self):
         """Actualización de tablas con soporte de orden, jerarquía y plegado de QRs (V8)."""
@@ -672,7 +830,6 @@ class StockApp(ctk.CTk):
         if file_path:
             if self.inventory.import_csv(file_path, family_filter=self.family_type):
                 self._update_all_ui()
-                self._load_master_table()
                 self.images.start_background_download(list(self.inventory.original_quantities.keys()))
                 self.status_label.configure(text=f"CSV: {os.path.basename(file_path)} cargado.")
 
@@ -692,7 +849,7 @@ class StockApp(ctk.CTk):
                     self.collapsed_containers.remove(code)
                 else:
                     self.collapsed_containers.add(code)
-                self._refresh_tables()
+                self._update_all_ui()
                 return
             
             self._show_product_image(code)
@@ -988,7 +1145,7 @@ class StockApp(ctk.CTk):
                         self._excluded_from_export.remove(code)
                     else:
                         self._excluded_from_export.add(code)
-                    self._refresh_diff_window()
+                    self._update_all_ui()
                     
         table.tree.bind("<Button-1>", toggle_no_export)
 
@@ -1032,7 +1189,7 @@ class StockApp(ctk.CTk):
         table.tree.bind("<Delete>", on_diff_delete)
         win.bind("<Delete>", on_diff_delete)
 
-        self._refresh_diff_window()
+        self._sync_diff_table()
 
         footer_diff = ctk.CTkFrame(win, fg_color="transparent")
         footer_diff.pack(pady=10)
@@ -1613,7 +1770,7 @@ class StockApp(ctk.CTk):
         
         # 1. Seleccionar el producto en el listado de escaneados en modo "Escaneo"
         self.sort_var.set("Escaneo")
-        self._refresh_tables()
+        self._update_all_ui()
         
         pos_str = str(pos)
         for row in self.scanned_table.tree.get_children():

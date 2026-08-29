@@ -13,39 +13,38 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-class DualLogger:
-    def __init__(self, filepath):
-        self.terminal = sys.stdout
-        self.log = open(filepath, "w", encoding='utf-8')
+# Logger persistente (reemplaza al DualLogger/session_log.txt).
+# Se importa lo antes posible para capturar errores de arranque.
+from src.logger import logger
 
-    def write(self, message):
-        if self.terminal:
-            try:
-                self.terminal.write(message)
-            except:
-                pass
-        self.log.write(message)
-        self.log.flush()
+def handle_exception(exc_type, exc_value, exc_traceback):
+    """Excepción global no capturada -> log (incluye hilos secundarios)."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logger.critical("Excepción no capturada", exc_info=(exc_type, exc_value, exc_traceback))
 
-    def flush(self):
-        if self.terminal:
-            try:
-                self.terminal.flush()
-            except:
-                pass
-        self.log.flush()
-
-# Redirigir consola a un archivo log que se pisa en cada ejecución
+sys.excepthook = handle_exception
+threading_excepthook_installed = False
 try:
-    log_path = os.path.join(project_root, "session_log.txt")
-    sys.stdout = DualLogger(log_path)
-    sys.stderr = sys.stdout
-except:
+    import threading
+    if hasattr(threading, "excepthook"):
+        _orig_threading_excepthook = threading.excepthook
+        def _thread_excepthook(args):
+            logger.critical(
+                "Excepción en hilo: %s", args.thread.name if args.thread else "?",
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+            _orig_threading_excepthook(args)
+        threading.excepthook = _thread_excepthook
+        threading_excepthook_installed = True
+except Exception:
     pass
 
 from src.main import StockApp
 
 if __name__ == "__main__":
+    logger.info("=== Inicio de aplicación ===")
     # Auto-elevación (Feedback Matías: Evita escudo en el icono)
     if not is_admin():
         # Re-lanzar con privilegios de administrador
@@ -60,13 +59,14 @@ if __name__ == "__main__":
             
         ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, params, None, 1)
         if ret <= 32:
+            logger.error("Error al solicitar permisos de administrador (ShellExecuteW=%s)", ret)
             print("Error al solicitar permisos de administrador.")
         sys.exit()
 
     try:
         app = StockApp()
         app.mainloop()
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        input("Error fatal. Presione Enter para salir...")
+    except Exception:
+        logger.exception("Error fatal en mainloop")
+    finally:
+        logger.info("=== Cierre de aplicación ===")

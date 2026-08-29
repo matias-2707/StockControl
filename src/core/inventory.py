@@ -76,6 +76,7 @@ class InventoryManager:
                     data = json.load(f)
                     return {**default_stock, **data}
             except Exception as e:
+                logger.warning("Error al leer main_stock.json: %s", e)
                 print(f"Error al leer main_stock.json: {e}")
                 return default_stock
         return default_stock
@@ -88,6 +89,7 @@ class InventoryManager:
                 json.dump(self.main_stock, f, indent=4)
             return True
         except Exception as e:
+            logger.error("Error al guardar main_stock.json: %s", e)
             print(f"Error al guardar main_stock.json: {e}")
             return False
 
@@ -458,15 +460,18 @@ class InventoryManager:
                         shutil.copy2(file_path, dest_path)
                         self.current_csv_path = dest_path # Actualizar a la ruta local
                     except Exception as e:
+                        logger.warning("Error al copiar CSV a Escaneos: %s", e)
                         print(f"Error al copiar CSV: {e}")
 
             # Aplicar filtros iniciales (incluyendo exclusiones actuales)
             self.refresh_data()
             return True
         except Exception as e:
+            logger.error("Error importando CSV (%s): %s", file_path, e)
             print(f"Error importando CSV: {e}")
             return False
         except Exception as e:
+            logger.error("Error importando CSV (%s): %s", file_path, e)
             print(f"Error importando CSV: {e}")
             return False
 
@@ -609,7 +614,8 @@ class InventoryManager:
                 self.data_changed = False
                 self.last_saved_path = path
                 return True
-            except:
+            except Exception as e:
+                logger.error("Error al guardar JSON (%s): %s", path, e)
                 return False
 
     def load_json(self, path):
@@ -670,6 +676,7 @@ class InventoryManager:
             
             return True
         except Exception as e:
+            logger.error("Error cargando JSON (%s): %s", path, e)
             print(f"Error cargando JSON: {e}")
             return False
 

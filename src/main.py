@@ -1,6 +1,7 @@
 import customtkinter as ctk
 import tkinter as tk
 from src.config import current_config, save_config
+from src.logger import logger
 from src.core.auth import AuthManager
 from src.core.inventory import InventoryManager
 from src.core.automation import AutomationManager
@@ -48,7 +49,9 @@ class StockApp(ctk.CTk):
             # Pasamos un callback que salta al MainThread para actualizar la UI con CustomTkinter
             self.images = ImageManager(current_config, progress_callback=self._on_image_progress)
             self.automation = AutomationManager(current_config, self.inventory)
+            logger.info("Módulos core inicializados correctamente")
         except Exception as e:
+            logger.exception("Error inicializando módulos core")
             print(f"Error inicializando módulos: {e}")
             self.quit()
             return
@@ -121,6 +124,7 @@ class StockApp(ctk.CTk):
         """Cierre ordenado: detiene el worker antes de destruir la ventana.
         Evita que un thread secundario siga trabajando sobre una UI destruida.
         """
+        logger.info("Cierre de aplicación solicitado (WM_DELETE_WINDOW)")
         self._worker_stop.set()
         try:
             self.destroy()
@@ -227,8 +231,10 @@ class StockApp(ctk.CTk):
             
             if self.inventory.original_quantities:
                 self.images.start_background_download(list(self.inventory.original_quantities.keys()))
+            logger.info("Sesión cargada desde: %s (familia=%s)", full_path, self.family_type)
             
         except Exception as e:
+            logger.exception("Error al cargar sesión desde %s", path)
             messagebox.showerror("Error de Carga", f"No se pudo cargar la sesión: {e}")
             self.quit()
 
@@ -829,9 +835,12 @@ class StockApp(ctk.CTk):
         file_path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
         if file_path:
             if self.inventory.import_csv(file_path, family_filter=self.family_type):
+                logger.info("CSV importado: %s", os.path.basename(file_path))
                 self._update_all_ui()
                 self.images.start_background_download(list(self.inventory.original_quantities.keys()))
                 self.status_label.configure(text=f"CSV: {os.path.basename(file_path)} cargado.")
+            else:
+                logger.error("Falló la importación del CSV: %s", file_path)
 
     def _on_row_double_click(self, table):
         selected = table.tree.selection()
@@ -943,8 +952,11 @@ class StockApp(ctk.CTk):
 
     def _on_save_manual(self):
         if self.inventory.save_json("auto_save_v8.json"):
+            logger.info("Guardado manual exitoso")
             self.show_toast("Sesión guardada correctamente.", mtype="success", duration=2000, use_history=False)
             self.btn_save.configure(fg_color="#28a745") # Reset a verde
+        else:
+            logger.error("Falló el guardado manual de la sesión")
 
     def _on_export_click(self):
         """Paso 1: Selector de familia para exportar (Feedback paridad)."""
@@ -1032,12 +1044,15 @@ class StockApp(ctk.CTk):
             if not self.automation.stop_event.is_set():
                 mode = self.inventory.config.get("paste_mode", "typing")
                 try:
+                    logger.info("Exportación iniciada: familia=%s, %d códigos, modo=%s", family, len(codes_to_send), mode)
                     self.automation.process_export(codes_to_send, mode=mode, progress_callback=progress_cb)
                     self.after(0, lambda: [lbl_status.configure(text="¡Exportación Finalizada!"), btn_stop.configure(text="Cerrar", fg_color="#28a745", command=prog_win.destroy)])
                     self.show_toast(f"Exportación {family} completa", mtype="success")
+                    logger.info("Exportación finalizada: familia=%s (%d códigos)", family, len(codes_to_send))
                 except Exception as e:
                     import traceback
                     err_str = traceback.format_exc()
+                    logger.exception("Error fatal de exportación (familia=%s)", family)
                     self.after(0, lambda: [
                         txt_log.insert("end", f"\n\n¡ERROR FATAL DE EXPORTACIÓN!\n{err_str}"),
                         txt_log.see("end"),
@@ -1196,6 +1211,44 @@ class StockApp(ctk.CTk):
         ctk.CTkLabel(footer_diff, text="Atajos: [F4] Sumar +1 a escaneo  |  [Supr] Restar -1 de escaneo  |  [Doble Clic] Ver foto", font=("Roboto", 11)).pack(side="left", padx=15)
         ctk.CTkButton(footer_diff, text="Cerrar (Esc / F3)", command=win.destroy, width=150, fg_color="#dc3545").pack(side="right", padx=15)
 
+
+    def _open_log_viewer(self):
+        """Abre la ventana de consulta del log persistente (solo lectura).
+
+        Maneja: log inexistente, log vacío, archivo grande (solo últimas N
+        líneas para no colgar la UI) y errores de lectura.
+        """
+        from src.logger import read_log_lines, default_log_file
+
+        log_path = default_log_file()
+        lines = read_log_lines(log_path)
+
+        win = ctk.CTkToplevel(self)
+        self.windows["log_viewer"] = win
+        win.title("Ver Log - Stock Cellular Center V8.0")
+        center_window(win, 900, 600)
+        win.transient(self)
+        win.focus_force()
+
+        ctk.CTkLabel(win, text="REGISTRO DE ACTIVIDAD (LOG)", font=("Roboto", 16, "bold")).pack(pady=(10, 2))
+        ctk.CTkLabel(win, text=log_path, font=("Roboto", 10), text_color="gray").pack(pady=(0, 5))
+
+        txt_log = ctk.CTkTextbox(win, font=("Consolas", 11))
+        txt_log.pack(fill="both", expand=True, padx=15, pady=5)
+        txt_log.insert("1.0", "\n".join(lines))
+        txt_log.configure(state="disabled")
+
+        footer = ctk.CTkFrame(win, fg_color="transparent")
+        footer.pack(pady=10)
+
+        def refresh():
+            txt_log.configure(state="normal")
+            txt_log.delete("1.0", "end")
+            txt_log.insert("1.0", "\n".join(read_log_lines(log_path)))
+            txt_log.configure(state="disabled")
+
+        ctk.CTkButton(footer, text="Refrescar", command=refresh, width=120).pack(side="left", padx=10)
+        ctk.CTkButton(footer, text="Cerrar", command=win.destroy, width=120, fg_color="#dc3545").pack(side="left", padx=10)
 
     def _open_options(self):
         if not self.auth.ask_master_password(title="Seguridad V8.0", text="Ingrese Contraseña de Acceso para Opciones:"):
@@ -1369,6 +1422,13 @@ class StockApp(ctk.CTk):
         txt_failed.configure(state="disabled")
 
         ctk.CTkButton(container, text="RENOVAR LICENCIA (30 días)", command=self.auth.show_renewal_window, fg_color="#6f42c1").pack(pady=10)
+
+        # --- VER LOG --- (Logging persistente V8)
+        ctk.CTkLabel(container, text="REGISTRO DE ACTIVIDAD (LOG)", font=("Roboto", 14, "bold"), text_color="#17a2b8").pack(pady=(20, 5))
+        log_actions_frame = ctk.CTkFrame(container)
+        log_actions_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(log_actions_frame, text="El log acumula eventos y errores entre sesiones (solo lectura).", font=("Roboto", 11), text_color="gray").pack(pady=5)
+        ctk.CTkButton(log_actions_frame, text="Ver Log", command=self._open_log_viewer, fg_color="#17a2b8").pack(pady=10, padx=20, fill="x")
 
         def save_all():
             # Actualizar config de manera integral

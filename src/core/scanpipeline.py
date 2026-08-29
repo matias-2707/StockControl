@@ -18,6 +18,8 @@ Garantías de diseño:
 import queue
 import threading
 
+from src.logger import logger
+
 
 def compute_scan_alerts(inventory, sku, pos, fam=None):
     """
@@ -130,6 +132,7 @@ class ScanWorker:
                     })
             except Exception as e:
                 # Un error jamás mata al worker ni detiene la cola
+                logger.exception("Error en worker de escaneo procesando sku=%s", event.get("sku", "?"))
                 try:
                     self.result_queue.put({
                         "type": "toast", "mtype": "error",

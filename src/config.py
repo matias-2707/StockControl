@@ -4,6 +4,8 @@ import sys
 import platform
 import base64
 
+from src.logger import logger
+
 # Guardar config.json en el directorio AppData/Local del usuario para aislamiento y persistencia
 if platform.system() == "Windows":
     config_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StockCellularCenter")
@@ -56,7 +58,8 @@ def load_config():
                 if "image_folder" in loaded and ("Stock V7" in loaded["image_folder"] or not os.path.isabs(loaded["image_folder"])):
                     loaded["image_folder"] = DEFAULT_IMAGE_FOLDER
                 return {**DEFAULT_CONFIG, **loaded}
-        except:
+        except Exception as e:
+            logger.error("Error al leer config.json: %s", e)
             return dict(DEFAULT_CONFIG)
     return dict(DEFAULT_CONFIG)
 
@@ -68,6 +71,7 @@ def save_config(config):
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             f.write(encoded_data)
     except Exception as e:
+        logger.error("Error al guardar config: %s", e)
         print(f"Error al guardar config: {e}")
 
 current_config = load_config()

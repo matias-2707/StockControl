@@ -459,6 +459,9 @@ class AuthManager:
                 entry.delete(0, 'end')
                 entry.focus_set()
 
+        entry.bind("<Return>", on_submit)
+        ctk.CTkButton(win, text="Aceptar", command=on_submit, fg_color="#3498db", height=35, font=("Segoe UI", 12, "bold")).pack(pady=10)
+
         win.after(100, entry.focus_set)
         win.wait_window()
         return result[0]

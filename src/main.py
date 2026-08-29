@@ -1165,10 +1165,14 @@ class StockApp(ctk.CTk):
         table.tree.bind("<Button-1>", toggle_no_export)
 
         def on_diff_f4(event=None):
+            # IMPORTANTE: el handler SIEMPRE devuelve "break" para consumir la tecla
+            # y cortar la cadena de bindtags (widget -> clase -> toplevel -> all).
+            # Sin esto, un binding duplicado en `win` (o de clase) dispararía el
+            # handler DOS veces por presión -> +2 unidades en vez de +1.
             selected = table.tree.selection()
-            if not selected: return
+            if not selected: return "break"
             values = table.tree.item(selected[0], "values")
-            if not values or len(values) < 2: return
+            if not values or len(values) < 2: return "break"
             sku = values[1].strip()
             if sku and not self.inventory.is_qr_code(sku):
                 self.inventory.add_item(sku)
@@ -1180,12 +1184,14 @@ class StockApp(ctk.CTk):
                         table.tree.selection_set(it)
                         table.tree.see(it)
                         break
+            return "break"
 
         def on_diff_delete(event=None):
+            # Misma política que on_diff_f4: consumir la tecla con "break".
             selected = table.tree.selection()
-            if not selected: return
+            if not selected: return "break"
             values = table.tree.item(selected[0], "values")
-            if not values or len(values) < 2: return
+            if not values or len(values) < 2: return "break"
             sku = values[1].strip()
             if sku and not self.inventory.is_qr_code(sku):
                 res = self.inventory.delete_last(sku)
@@ -1198,11 +1204,14 @@ class StockApp(ctk.CTk):
                             table.tree.selection_set(it)
                             table.tree.see(it)
                             break
+            return "break"
 
+        # FIX (2026-08-29): se eliminan los bindings duplicados en `win`.
+        # Tk propaga el evento por bindtags (widget -> clase -> toplevel -> all):
+        # con el foco en el tree, F4/Supr disparaba el handler DOS veces (+2/-2).
+        # Los handlers devuelven "break" para consumir la tecla.
         table.tree.bind("<F4>", on_diff_f4)
-        win.bind("<F4>", on_diff_f4)
         table.tree.bind("<Delete>", on_diff_delete)
-        win.bind("<Delete>", on_diff_delete)
 
         self._sync_diff_table()
 

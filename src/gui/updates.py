@@ -520,6 +520,107 @@ def _diff_insert_index(rows: Tuple[RowSpec, ...], is_faltante: bool, sku: str, m
     )
 
 
+def _apply_delete_sequential(prev_rows: Tuple[RowSpec, ...], event, model, options: ViewOptions) -> Tuple[RowSpec, ...]:
+    """Reproyecta SOLO las filas afectadas por una ELIMINACIÓN (Supr en Diferencias).
+
+    El modelo ya refleja la eliminación (delete_last ya se ejecutó). El evento
+    trae {sku, pos, is_qr} donde pos es la POSICIÓN ELIMINADA (1-indexed) que
+    el llamador capturó ANTES de borrar.
+
+    Filas afectadas (misma filosofía que _apply_sequential):
+    - la fila de la posición eliminada desaparece;
+    - las filas con posición > pos se CORREN una posición hacia arriba (su key
+      cambia de p:<x> a p:<x-1>);
+    - la fila del SKU (si quedan posiciones: pasa a ser la última aparición con
+      cantidad y color) y los QRs de los contenedores activos del SKU se
+      reproyectan.
+
+    El resto de las filas queda intacto: diff_views generará los deletes/inserts
+    puntuales en lugar de reconstruir toda la tabla.
+    """
+    sku = event["sku"]
+    del_pos = event["pos"]
+    is_qr = event.get("is_qr", model.is_qr_code(sku))
+
+    affected_positions = set()
+    # posiciones restantes del SKU (el modelo ya lo borró)
+    affected_positions.update(model.scanned_items.get(sku, []))
+    if not is_qr:
+        # contenedores activos del SKU en sus posiciones restantes
+        seq = model.scan_sequence
+        for p in list(affected_positions):
+            box, sec = model.get_containers_for_index(seq, p - 1)
+            for c in (box, sec):
+                if c:
+                    affected_positions.update(model.scanned_items.get(c, []))
+
+    if not affected_positions:
+        # No quedan filas del SKU ni contenedores: solo corrimiento.
+        return _shift_rows_after(prev_rows, del_pos, model, options)
+
+    # 1. Quitar la fila eliminada y correr las posteriores.
+    shifted = _shift_rows_after(prev_rows, del_pos, model, options)
+
+    # 2. Quitar las filas afectadas (el SKU y sus QRs) que ya estaban corridas.
+    rows = [r for r in shifted if _pos_from_key(r.key) not in affected_positions]
+
+    # 3. Reinsertar las filas afectadas reproyectadas en su posición correcta.
+    new_specs = {}
+    for p in affected_positions:
+        new_specs[p] = _scanned_row_for(model, options, p - 1)
+
+    for p, spec in new_specs.items():
+        if spec is None:
+            continue
+        rows.append(spec)
+
+    # El orden visual depende del sort_mode (Último arriba/Escaneo invierten).
+    reverse = options.sort_mode in (SORT_LAST_TOP, SORT_SCAN)
+    rows.sort(key=lambda r: _pos_from_key(r.key), reverse=reverse)
+    return tuple(rows)
+
+
+def _shift_rows_after(prev_rows: Tuple[RowSpec, ...], del_pos: int, model, options: ViewOptions) -> Tuple[RowSpec, ...]:
+    """Quita la fila de la posición del_pos y reproyecta las posteriores corridas.
+
+    Las filas con posición > del_pos se corren a posición-1; se reproyectan con
+    _scanned_row_for para mantener el invariante (un QR corrido puede cambiar
+    su display [ESPERANDO REEMPLAZO]/faltante, y un producto su posición).
+    """
+    rows = []
+    for r in prev_rows:
+        p = _pos_from_key(r.key)
+        if p == del_pos:
+            continue
+        if p > del_pos:
+            spec = _scanned_row_for(model, options, p - 2)
+            if spec is not None:
+                rows.append(spec)
+        else:
+            rows.append(r)
+    return tuple(rows)
+
+
+def _apply_delete(view: ScanView, event, model, options: ViewOptions):
+    """Aplica una eliminación ya reflejada en el modelo a la vista.
+
+    Devuelve (nueva_vista, acciones). scanned se reproyecta de forma
+    incremental (corrimiento + filas afectadas); master y diff solo la fila
+    del SKU; métricas desde el modelo.
+    """
+    if options.sort_mode in SEQUENTIAL_SORTS:
+        new_scanned = _apply_delete_sequential(view.scanned, event, model, options)
+    else:
+        new_scanned = _apply_grouped(model, options)
+
+    new_master = _apply_master(view.master, event, model, options)
+    new_diff = _apply_diff(view.diff, event, model, options)
+    new_metrics = _metrics(model)
+
+    new_view = ScanView(new_scanned, new_master, new_diff, new_metrics)
+    return new_view, diff_views(view, new_view)
+
+
 def _event_is_consistent(event, model) -> bool:
     """El evento debe corresponder a una posición real del SKU en el modelo.
 
@@ -542,8 +643,16 @@ def apply_event(view: ScanView, event: dict, model, options: Optional[ViewOption
     Devuelve (nueva_vista, acciones). Si el evento es inconsistente con el
     modelo, cae al rebuild completo (fallback "dirty"): la vista resultante
     siempre es correcta.
+
+    El evento puede ser de dos tipos:
+      - alta: {sku, pos, ...} (F4 / escaneo normal) — el SKU ya está en el modelo.
+      - delete: {op: "delete", sku, pos, is_qr} — delete_last ya se ejecutó;
+        pos es la posición 1-indexed ELIMINADA capturada antes de borrar.
     """
     options = options if options is not None else ViewOptions()
+
+    if event.get("op") == "delete":
+        return _apply_delete(view, event, model, options)
 
     if not _event_is_consistent(event, model):
         full = build_full_view(model, options)

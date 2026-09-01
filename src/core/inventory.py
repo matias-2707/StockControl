@@ -41,6 +41,33 @@ class InventoryManager:
         self.pending_verifications = {} # code -> { 'pos': N, 'history': [] }
         
         self.lock = threading.Lock()
+
+        # --- Caché de ubicaciones (auditoría rendimiento 2026-08-29) ---
+        # Evita re-recorrer el historial completo (O(archivos x posiciones)) por
+        # cada búsqueda repetida del mismo SKU. Dos niveles:
+        #   - _location_cache: resultado FINAL de get_expected_container_for_sku
+        #     (main_stock primero, historial como fallback).
+        #   - _history_location_cache: resultado SOLO-historail (usado por
+        #     StockApp.get_possible_location y como fallback del anterior).
+        # Invalidación: se limpian al mutar main_stock (update_product_location)
+        # y al reindexar el historial (_index_history). Lock dedicado para no
+        # anidar con inventory.lock (check_proximity ya toma ese lock).
+        self._location_cache = {}
+        self._history_location_cache = {}
+        self._location_cache_lock = threading.Lock()
+        self._location_version = 0  # se incrementa en cada invalidación
+
+        # --- Caché de estado de contenedores (auditoría 2026-08-31) ---
+        # get_container_status() recorría TODA la secuencia por cada QR
+        # (patrón O(QRs × n) ≈ O(n²) detectado en _scanned_view con 1600 ítems).
+        # Ahora se precomputa container -> scanned_count UNA vez por versión
+        # de scan_sequence; las consultas posteriores son O(1).
+        # Invalidación: _invalidate_container_status_cache() en cada mutación
+        # de scan_sequence (add/delete/move/QR replace/load).
+        self._container_counts = {}          # container -> scanned_count
+        self._container_counts_version = 0   # versión de scan_sequence computada
+        self._container_counts_computed_version = -1  # última versión precomputada
+        self._container_status_lock = threading.Lock()
         
         # Iniciar indexación en segundo plano
         threading.Thread(target=self._index_history, daemon=True).start()
@@ -125,20 +152,27 @@ class InventoryManager:
                     }
                 expected_qty = self.original_quantities.get(sku, 1)
                 containers[new_container].setdefault("expected_skus", {})[sku] = expected_qty
-            
+        
+        # Fuente de verdad cambiada: invalidar caché de ubicaciones
+        self._invalidate_location_cache()
+        
+        with self.lock:
             if update_file:
                 return self.save_main_stock()
             return True
 
-    def get_expected_container_for_sku(self, sku: str) -> str:
-        """Busca el contenedor esperado para un SKU en main_stock.json o en el historial."""
+    def _history_location(self, sku: str):
+        """Busca la última ubicación conocida de un SKU SOLO en el historial.
+
+        Lógica extraída (idéntica a la usada antes por get_expected_container_for_sku
+        y por StockApp.get_possible_location): recorre los archivos históricos del
+        más reciente al más antiguo y devuelve el primer contenedor donde aparece
+        el SKU, o None si no aparece en ningún historial.
+
+        NO toma locks: el llamador gestiona la sincronización (la caché usa su
+        propio lock).
+        """
         sku = sku.strip().upper()
-        # 1. Prioridad absoluta: main_stock.json
-        expected = self.main_stock.get("product_locations", {}).get(sku)
-        if expected:
-            return expected
-        
-        # 2. Fallback a historial
         sorted_hist_files = sorted(self.historical_sequences.keys(), key=os.path.getmtime, reverse=True)
         for hist_file in sorted_hist_files:
             hist_seq = self.historical_sequences[hist_file]
@@ -149,6 +183,66 @@ class InventoryManager:
                     if h_container:
                         return h_container
         return None
+
+    def _history_location_cached(self, sku: str):
+        """Versión cacheada de _history_location (thread-safe).
+
+        La caché se invalida con _invalidate_location_cache() cuando cambia la
+        fuente de verdad (main_stock o historial). Cachea también el miss (None)
+        para no re-escancar el historial completo por SKUs que no existen.
+
+        Seguridad de hilos: si la fuente de verdad cambia (incremento de
+        _location_version) mientras se computa la búsqueda, el resultado NO se
+        cachea (evita escribir un valor stale después de una invalidación).
+        """
+        sku = sku.strip().upper()
+        with self._location_cache_lock:
+            if sku in self._history_location_cache:
+                return self._history_location_cache[sku]
+            version = self._location_version
+        loc = self._history_location(sku)
+        with self._location_cache_lock:
+            if version != self._location_version:
+                return loc  # fuente de verdad cambió durante el cálculo: no cachear
+            self._history_location_cache[sku] = loc
+        return loc
+
+    def _invalidate_location_cache(self):
+        """Invalida ambas cachés de ubicación (thread-safe).
+
+        Se llama cuando cambia la fuente de verdad:
+        - update_product_location() (mutación de main_stock)
+        - _index_history() (incorporación de historial nuevo)
+        """
+        with self._location_cache_lock:
+            self._location_cache.clear()
+            self._history_location_cache.clear()
+            self._location_version += 1
+
+    def get_expected_container_for_sku(self, sku: str) -> str:
+        """Busca el contenedor esperado para un SKU en main_stock.json o en el historial.
+
+        La lectura de main_stock y la escritura en caché ocurren bajo el mismo
+        lock de caché: así, una invalidación concurrente (update_product_location)
+        queda serializada y nunca deja un valor stale cacheado.
+        """
+        sku = sku.strip().upper()
+        with self._location_cache_lock:
+            # 1. Caché: resultado previo (main_stock o historial)
+            if sku in self._location_cache:
+                return self._location_cache[sku]
+            # 2. Prioridad absoluta: main_stock.json
+            expected = self.main_stock.get("product_locations", {}).get(sku)
+            if expected:
+                self._location_cache[sku] = expected
+                return expected
+
+        # 3. Fallback a historial (cacheado y versionado)
+        loc = self._history_location_cached(sku)
+        with self._location_cache_lock:
+            if sku not in self._location_cache:
+                self._location_cache[sku] = loc
+        return loc
 
     def get_container_expected_items(self, container_code: str) -> dict:
         """Devuelve un diccionario {sku: expected_qty} para el contenedor según main_stock.json."""
@@ -172,6 +266,13 @@ class InventoryManager:
         - missing_count: faltantes
         - is_complete: True si completó todo lo esperado
         - display_str: "✓" si está completo, str(missing) si faltan, o ""
+
+        Optimización (auditoría 2026-08-31): el conteo de productos por
+        contenedor se precomputa UNA vez por versión de scan_sequence
+        (_compute_container_counts) en lugar de recorrer la secuencia completa
+        por cada llamada. La caché se invalida en cada mutación de
+        scan_sequence; si seq es una copia externa (no self.scan_sequence) se
+        computa directo para no devolver estado stale.
         """
         if seq is None:
             seq = self.scan_sequence
@@ -179,14 +280,22 @@ class InventoryManager:
         expected_items = self.get_container_expected_items(container_code)
         expected_total = sum(expected_items.values())
 
-        # Contar cuántos productos están escaneados bajo este contenedor
-        scanned_count = 0
-        for i, code in enumerate(seq):
-            if not self.is_qr_code(code):
-                box, sec = self.get_containers_for_index(seq, i)
-                active_c = box if box else (sec if sec else None)
-                if active_c == container_code or sec == container_code:
-                    scanned_count += 1
+        if seq is self.scan_sequence:
+            with self._container_status_lock:
+                if self._container_counts_version != self._container_counts_computed_version:
+                    self._container_counts = self._compute_container_counts(seq)
+                    self._container_counts_computed_version = self._container_counts_version
+                scanned_count = self._container_counts.get(container_code, 0)
+        else:
+            # Secuencia externa (tests/manipulación directa): conteo directo,
+            # misma semántica que el método original.
+            scanned_count = 0
+            for i, code in enumerate(seq):
+                if not self.is_qr_code(code):
+                    box, sec = self.get_containers_for_index(seq, i)
+                    active_c = box if box else (sec if sec else None)
+                    if active_c == container_code or sec == container_code:
+                        scanned_count += 1
 
         missing = max(0, expected_total - scanned_count)
         is_complete = (expected_total > 0 and scanned_count >= expected_total)
@@ -238,6 +347,10 @@ class InventoryManager:
                     
         with self.lock:
             self.historical_sequences = history
+
+        # El historial es fuente de verdad de la caché de ubicaciones:
+        # invalidar para que SKUs cacheados (incluso misses) se re-resuelvan.
+        self._invalidate_location_cache()
 
     def parse_sku_intelligently(self, sku):
         """
@@ -481,6 +594,45 @@ class InventoryManager:
             pos = idx + 1
             self.scanned_items[code].append(pos)
         self.scan_counter = len(self.scan_sequence) + 1
+        self._invalidate_container_status_cache()
+
+    def _invalidate_container_status_cache(self):
+        """Marca la caché de conteo de contenedores como obsoleta.
+
+        Se llama desde _rebuild_scanned_items (add/delete/move/QR replace) y
+        desde load_json (asignación directa de scan_sequence). El próximo
+        get_container_status() re-precomputa el mapa container -> scanned_count
+        en una sola pasada O(n).
+        """
+        with self._container_status_lock:
+            self._container_counts_version += 1
+
+    def _compute_container_counts(self, seq):
+        """Precomputa container_code -> cantidad de productos escaneados bajo él.
+
+        Una sola pasada O(n) sobre la secuencia; reemplaza el recorrido completo
+        que get_container_status hacía por cada QR (patrón O(QRs × n)).
+
+        Semántica idéntica al conteo original: un producto cuenta para su
+        contenedor ACTIVO (caja si hay, si no mueble/vidriera) y además para su
+        MUEBLE cuando está dentro de una caja (el original hacía
+        `active_c == container or sec == container`, que cuenta en ambos casos).
+        Si active_c == sec (producto sin caja), cuenta una sola vez.
+        """
+        counts = {}
+        for i, code in enumerate(seq):
+            if self.is_qr_code(code):
+                continue
+            box, sec = self.get_containers_for_index(seq, i)
+            active_c = box if box else (sec if sec else None)
+            seen = set()
+            if active_c:
+                seen.add(active_c)
+            if sec:
+                seen.add(sec)
+            for c in seen:
+                counts[c] = counts.get(c, 0) + 1
+        return counts
 
     def add_item(self, sku):
         """Añade un ítem al escaneo o reemplaza un QR si está en espera."""
@@ -643,6 +795,8 @@ class InventoryManager:
                             if 0 <= idx < len(seq):
                                 seq[idx] = code
                     self.scan_sequence = [x for x in seq if x is not None]
+
+                self._invalidate_container_status_cache()
                 
                 self.scan_counter = data.get("counter") or data.get("scan_counter") or 1
                 self.family_type = data.get("family_type")

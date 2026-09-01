@@ -240,7 +240,8 @@ class TestMainPyStaticGuard(unittest.TestCase):
         # El bloque de la ventana de diferencias debe devolver "break"
         diff_block = src[src.index('def on_diff_f4'):src.index('def on_diff_delete')]
         self.assertIn('return "break"', diff_block, "on_diff_f4 debe devolver 'break'")
-        del_block = src[src.index('def on_diff_delete'):src.index('self._sync_diff_table()')]
+        # El bloque termina en la función siguiente (_open_log_viewer)
+        del_block = src[src.index('def on_diff_delete'):src.index('def _open_log_viewer')]
         self.assertIn('return "break"', del_block, "on_diff_delete debe devolver 'break'")
 
 

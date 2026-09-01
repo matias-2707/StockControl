@@ -505,12 +505,20 @@ class StockApp(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _view_options(self):
-        """Opciones de vista desde el estado de la app (orden, colapso, exclusión)."""
+        """Opciones de vista desde el estado de la app (orden, colapso, exclusión).
+
+        Optimización (auditoría 2026-08-29): cuando la ventana de Diferencias está
+        CERRADA no se pasa el resolver de ubicaciones. _diff_view usa "Desconocida"
+        para todas las filas, evitando recorrer el historial por cada fila de
+        diferencias (patrón filas x archivos x posiciones). Al abrir la ventana
+        (_on_diff_click) se fuerza un rebuild con resolver para mantener el
+        comportamiento anterior.
+        """
         return ViewOptions(
             sort_mode=self.sort_var.get(),
             collapsed_containers=frozenset(self.collapsed_containers),
             excluded_from_export=frozenset(self._excluded_from_export),
-            location_resolver=self.get_possible_location,
+            location_resolver=self.get_possible_location if self._diff_window_open() else None,
         )
 
     def _rebuild_view_state(self):
@@ -1175,15 +1183,27 @@ class StockApp(ctk.CTk):
             if not values or len(values) < 2: return "break"
             sku = values[1].strip()
             if sku and not self.inventory.is_qr_code(sku):
-                self.inventory.add_item(sku)
-                self._update_all_ui()
-                self.show_toast(f"+1 unidad agregada a escaneo: {sku}", mtype="success", duration=1500, use_history=False)
-                for it in table.tree.get_children():
-                    v = table.tree.item(it, "values")
-                    if v and v[1] == sku:
-                        table.tree.selection_set(it)
-                        table.tree.see(it)
-                        break
+                # F4 = +1: agrega al modelo y aplica SOLO las filas afectadas
+                # (camino incremental de updates.py; auditoría 2026-08-31).
+                result = self.inventory.add_item(sku)
+                if result:
+                    ev = {
+                        "sku": sku,
+                        "pos": result["pos"],
+                        "fam": result.get("fam"),
+                        "ts": time.time(),
+                        "replaced": result.get("replaced", False),
+                        "is_qr": False,
+                        "old_sku": result.get("old_sku"),
+                    }
+                    self._apply_incremental([ev])
+                    self.show_toast(f"+1 unidad agregada a escaneo: {sku}", mtype="success", duration=1500, use_history=False)
+                    for it in table.tree.get_children():
+                        v = table.tree.item(it, "values")
+                        if v and v[1] == sku:
+                            table.tree.selection_set(it)
+                            table.tree.see(it)
+                            break
             return "break"
 
         def on_diff_delete(event=None):
@@ -1194,9 +1214,14 @@ class StockApp(ctk.CTk):
             if not values or len(values) < 2: return "break"
             sku = values[1].strip()
             if sku and not self.inventory.is_qr_code(sku):
+                # Supr = -1: capturar la posición ANTES de borrar para que el
+                # incremental sepa qué fila correr/eliminar.
+                indices = [i for i, x in enumerate(self.inventory.scan_sequence) if x == sku]
                 res = self.inventory.delete_last(sku)
-                if res:
-                    self._update_all_ui()
+                if res and indices:
+                    last_pos = indices[-1] + 1  # 1-indexed
+                    ev = {"op": "delete", "sku": sku, "pos": last_pos, "is_qr": False}
+                    self._apply_incremental([ev])
                     self.show_toast(f"-1 unidad restada de escaneo: {sku}", mtype="info", duration=1500, use_history=False)
                     for it in table.tree.get_children():
                         v = table.tree.item(it, "values")
@@ -1213,7 +1238,10 @@ class StockApp(ctk.CTk):
         table.tree.bind("<F4>", on_diff_f4)
         table.tree.bind("<Delete>", on_diff_delete)
 
-        self._sync_diff_table()
+        # Al abrir la ventana, la vista previa se construyó con resolver=None
+        # (Diferencias cerrada). Rebuild con resolver para mostrar ubicaciones
+        # reales, manteniendo el comportamiento de V7.1/V8 previo.
+        self._update_all_ui()
 
         footer_diff = ctk.CTkFrame(win, fg_color="transparent")
         footer_diff.pack(pady=10)
@@ -1897,16 +1925,14 @@ class StockApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="Dejar aquí (Guardar)", fg_color="#3a7ebf", command=on_keep, width=150).pack(side="left", padx=10)
 
     def get_possible_location(self, sku):
-        """Busca la última ubicación conocida del SKU en el historial."""
-        for hist_file in sorted(self.inventory.historical_sequences.keys(), key=os.path.getmtime, reverse=True):
-            hist_seq = self.inventory.historical_sequences[hist_file]
-            for i, code in enumerate(hist_seq):
-                if code == sku:
-                    h_box, h_sec = self.inventory.get_containers_for_index(hist_seq, i)
-                    h_container = h_box if h_box else (h_sec if h_sec else None)
-                    if h_container:
-                        return h_container
-        return "Desconocida"
+        """Busca la última ubicación conocida del SKU en el historial.
+
+        Cacheado: delega en InventoryManager._history_location_cached para no
+        recorrer el historial completo en búsquedas repetidas (la caché se
+        invalida al cambiar main_stock o al reindexar el historial).
+        """
+        loc = self.inventory._history_location_cached(sku)
+        return loc if loc else "Desconocida"
 
 if __name__ == "__main__":
     app = StockApp()

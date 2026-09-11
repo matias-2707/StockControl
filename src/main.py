@@ -4,7 +4,9 @@ from src.config import current_config, save_config
 from src.logger import logger
 from src.core.auth import AuthManager
 from src.core.inventory import InventoryManager
-from src.core.automation import AutomationManager
+from src.core.automation import (AutomationManager, ExportState, build_export_list,
+                                 TYPING_PROFILES, DEFAULT_TYPING_SPEED, clamp_typing_speed,
+                                 typing_profile, selector_semantics)
 from src.core.images import ImageManager
 from src.gui.components.tables import InventoryTable
 from src.gui.components.selector import SelectorWindow
@@ -995,19 +997,13 @@ class StockApp(ctk.CTk):
 
     def _start_export_flow(self, family):
         """Paso 2: Ventana de progreso y ejecución (Feedback paridad)."""
-        # Filtrar códigos por familia
-        scans_with_pos = []
-        for code, positions in self.inventory.scanned_items.items():
-            if code in self._excluded_from_export:
-                continue
-            # Feedback Matías: AG export bug fix.
-            # Convertimos a uppercase y buscamos por prefijo para captar "AG", "AG-xxx", etc.
-            item_fam = self.inventory.family_map.get(code, "").upper()
-            if item_fam.startswith(family.upper()):
-                for pos in positions:
-                    scans_with_pos.append((pos, code))
-        scans_with_pos.sort() # Orden cronológico de escaneo
-        codes_to_send = [s[1] for s in scans_with_pos]
+        # Filtrar códigos por familia (orden cronológico de escaneo)
+        codes_to_send = build_export_list(
+            self.inventory.scanned_items,
+            family,
+            self.inventory.family_map,
+            frozenset(self._excluded_from_export),
+        )
 
         if not codes_to_send:
             self.show_toast(f"No hay códigos de la familia {family}", mtype="error")
@@ -1053,10 +1049,18 @@ class StockApp(ctk.CTk):
                 mode = self.inventory.config.get("paste_mode", "typing")
                 try:
                     logger.info("Exportación iniciada: familia=%s, %d códigos, modo=%s", family, len(codes_to_send), mode)
-                    self.automation.process_export(codes_to_send, mode=mode, progress_callback=progress_cb)
-                    self.after(0, lambda: [lbl_status.configure(text="¡Exportación Finalizada!"), btn_stop.configure(text="Cerrar", fg_color="#28a745", command=prog_win.destroy)])
-                    self.show_toast(f"Exportación {family} completa", mtype="success")
-                    logger.info("Exportación finalizada: familia=%s (%d códigos)", family, len(codes_to_send))
+                    report = self.automation.process_export(codes_to_send, mode=mode, progress_callback=progress_cb)
+                    if report.state == ExportState.COMPLETED:
+                        self.after(0, lambda: [lbl_status.configure(text=f"Exportación completada ({report.sent}/{report.total})"), btn_stop.configure(text="Cerrar", fg_color="#28a745", command=prog_win.destroy)])
+                        self.show_toast(f"Exportación {family} completada ({report.sent}/{report.total})", mtype="success")
+                    elif report.state == ExportState.CANCELLED:
+                        self.after(0, lambda: [lbl_status.configure(text=f"Exportación cancelada ({report.sent}/{report.total})"), btn_stop.configure(text="Cerrar", command=prog_win.destroy)])
+                        self.show_toast(f"Exportación cancelada ({report.sent}/{report.total})", mtype="warning")
+                    elif report.state == ExportState.ERROR:
+                        self.after(0, lambda: [lbl_status.configure(text=f"Exportación interrumpida por error ({report.sent}/{report.total})"), btn_stop.configure(text="Cerrar", fg_color="#dc3545", command=prog_win.destroy)])
+                        self.show_toast(f"Exportación interrumpida por error ({report.sent}/{report.total})", mtype="error")
+                    else:
+                        self.after(0, lambda: [lbl_status.configure(text=f"Exportación {report.state} ({report.sent}/{report.total})"), btn_stop.configure(text="Cerrar", command=prog_win.destroy)])
                 except Exception as e:
                     import traceback
                     err_str = traceback.format_exc()
@@ -1375,17 +1379,37 @@ class StockApp(ctk.CTk):
 
         # MODO DE EXPORTACIÓN
         ctk.CTkLabel(container, text="MODO DE EXPORTACIÓN", font=("Roboto", 14, "bold")).pack(pady=(20, 5))
-        paste_var = ctk.StringVar(value=self.inventory.config.get("paste_mode", "typing"))
-        ctk.CTkRadioButton(container, text="Tecleo Carácter por Carácter", variable=paste_var, value="typing").pack(pady=5)
-        ctk.CTkRadioButton(container, text="Pegado Rápido (Control+V)", variable=paste_var, value="clipboard").pack(pady=5)
+        method_var = ctk.StringVar(value=self.inventory.config.get("paste_mode", "typing"))
+        ctk.CTkRadioButton(container, text="Tecleo (rápido)", variable=method_var, value="typing", command=lambda: refresh_controls()).pack(pady=5)
+        ctk.CTkRadioButton(container, text="Portapapeles (seguro)", variable=method_var, value="clipboard", command=lambda: refresh_controls()).pack(pady=5)
         
         # VELOCIDAD
         ctk.CTkLabel(container, text="VELOCIDAD DE EXPORTACIÓN", font=("Roboto", 14, "bold")).pack(pady=(20, 5))
-        speed_var = ctk.DoubleVar(value=self.inventory.config.get("speed_multiplier", 1.0))
-        lbl_speed = ctk.CTkLabel(container, text=f"Velocidad actual: {speed_var.get():.1f}x", font=("Roboto", 12))
+        typing_speed_var = ctk.IntVar(value=clamp_typing_speed(self.inventory.config.get("typing_speed", DEFAULT_TYPING_SPEED)))
+        lbl_speed = ctk.CTkLabel(container, text="", font=("Roboto", 12))
         lbl_speed.pack(pady=2)
-        slider_speed = ctk.CTkSlider(container, from_=0.1, to=10.0, number_of_steps=99, variable=speed_var, command=lambda v: lbl_speed.configure(text=f"Velocidad actual: {v:.1f}x"))
+        slider_speed = ctk.CTkSlider(container, from_=1, to=len(TYPING_PROFILES), number_of_steps=len(TYPING_PROFILES) - 1, variable=typing_speed_var, command=lambda v: on_speed_change(v))
         slider_speed.pack(pady=5)
+        # MODO SEGURO
+        safe_var = ctk.BooleanVar(value=bool(self.inventory.config.get("safe_mode", False)))
+        ctk.CTkCheckBox(container, text="Modo seguro", variable=safe_var, command=lambda: refresh_controls()).pack(pady=(10, 5))
+        ctk.CTkLabel(container, text="Tecleo: entrega por tecleo con la velocidad elegida. Portapapeles / Modo seguro: entrega más confiable y desactiva el selector de velocidad.", font=("Roboto", 10), text_color="gray", wraplength=420, justify="left").pack(pady=(0, 8))
+
+        def on_speed_change(v):
+            s = clamp_typing_speed(round(float(v)))
+            try:
+                typing_speed_var.set(s)
+            except Exception:
+                pass
+            lbl_speed.configure(text="Velocidad de exportación: " + typing_profile(s)["name"])
+
+        def refresh_controls():
+            st = selector_semantics(method_var.get(), safe_var.get())
+            slider_speed.configure(state=("normal" if st["speed_enabled"] else "disabled"))
+            lbl_speed.configure(text_color=("white" if st["speed_enabled"] else "gray"))
+            on_speed_change(typing_speed_var.get())
+
+        refresh_controls()
         
         # EXCLUSIÓN Y LICENCIA
         ctk.CTkLabel(container, text="LISTA DE EXCLUSIÓN Y LICENCIA", font=("Roboto", 14, "bold")).pack(pady=(20, 5))
@@ -1470,8 +1494,9 @@ class StockApp(ctk.CTk):
         def save_all():
             # Actualizar config de manera integral
             self.inventory.config["theme"] = theme_var.get()
-            self.inventory.config["paste_mode"] = paste_var.get()
-            self.inventory.config["speed_multiplier"] = round(speed_var.get(), 1)
+            self.inventory.config["paste_mode"] = method_var.get()
+            self.inventory.config["typing_speed"] = clamp_typing_speed(typing_speed_var.get())
+            self.inventory.config["safe_mode"] = bool(safe_var.get())
             self.inventory.config["proximity_window"] = win_var.get()
             self.inventory.config["proximity_threshold"] = thresh_var.get()
             
@@ -1589,7 +1614,7 @@ class StockApp(ctk.CTk):
             ctk.CTkButton(header_frame, text="🗑 Limpiar Todo", width=120, fg_color="#dc3545", command=lambda: [self.toast_history.clear(), win.destroy(), self._open_toast_history()]).pack(side="right")
             
             for item in reversed(active_alerts):
-                f = ctk.CTkFrame(scroll, fg_color=("#f0f0f0", "#2b2b2b"), cursor="hand2")
+                f = ctk.CTkFrame(scroll, fg_color=("#f0f0f0", "#2b2b2b"))
                 f.pack(fill="x", pady=2, padx=5)
                 
                 t_color = "#dc3545" # Alertas de mal guardado son rojas
@@ -1598,9 +1623,15 @@ class StockApp(ctk.CTk):
                 lbl_msg = ctk.CTkLabel(f, text=item["msg"], font=("Roboto", 11, "bold"), text_color=t_color, wraplength=330, justify="left")
                 lbl_msg.pack(side="left", padx=5, fill="x", expand=True)
                 
-                # Hacer la fila interactiva para resolver el mal guardado
-                lbl_msg.bind("<Button-1>", lambda e, it=item, w=win: self._resolve_wrong_placement(it, w))
-                f.bind("<Button-1>", lambda e, it=item, w=win: self._resolve_wrong_placement(it, w))
+                # Solo las alertas con metadata de ubicación son resolvibles con
+                # click. Las demás (avisos, errores, info) no bindean el resolver:
+                # evita el crash 'NoneType' al hacer click en una notificación
+                # sin datos de ubicación.
+                if get_placement_meta(item)[0] is not None:
+                    f.configure(cursor="hand2")
+                    lbl_msg.configure(cursor="hand2")
+                    lbl_msg.bind("<Button-1>", lambda e, it=item, w=win: self._resolve_wrong_placement(it, w))
+                    f.bind("<Button-1>", lambda e, it=item, w=win: self._resolve_wrong_placement(it, w))
 
     def _focus_search(self):
         """Búsqueda interactiva con iteración (Enter)."""
@@ -1865,7 +1896,26 @@ class StockApp(ctk.CTk):
             )
 
     def _resolve_wrong_placement(self, item, history_window):
-        meta = item["metadata"]
+        meta, reason = get_placement_meta(item)
+        if meta is None:
+            # Interacción normal de usuario: nunca debe lanzar traceback.
+            # Se registra el contexto (índice, tipo, mensaje, motivo) para
+            # detectar estados inconsistentes sin inundar el log.
+            try:
+                idx = self.toast_history.index(item) if item in self.toast_history else None
+            except Exception:
+                idx = None
+            msg = item.get("msg") if isinstance(item, dict) else str(item)
+            logger.warning(
+                "Click en notificación sin metadata de ubicación: "
+                "índice=%s, tipo=%s, msg=%r, motivo=%s",
+                idx, type(item).__name__, msg, reason,
+            )
+            self.show_toast(
+                "Esta notificación no tiene datos de ubicación para resolver.",
+                mtype="info", duration=2500, use_history=False,
+            )
+            return
         sku = meta["sku"]
         pos = meta["pos"]
         curr_c = meta["current_container"]
@@ -1933,6 +1983,28 @@ class StockApp(ctk.CTk):
         """
         loc = self.inventory._history_location_cached(sku)
         return loc if loc else "Desconocida"
+
+
+def get_placement_meta(item):
+    """Extrae y valida la metadata de una alerta de ubicación incorrecta.
+
+    Devuelve (meta_dict, reason):
+    - meta_dict: dict con sku/pos/current_container/expected_container, o None.
+    - reason: motivo por el cual no hay metadata utilizable (para logging).
+
+    Pura y testeable: la UI la usa para decidir si bindea el resolver y para
+    defender el callback sin traceback.
+    """
+    if not isinstance(item, dict):
+        return None, f"item no es dict (tipo {type(item).__name__})"
+    meta = item.get("metadata")
+    if not isinstance(meta, dict):
+        return None, f"metadata ausente o no-dict (tipo {type(meta).__name__})"
+    missing = [k for k in ("sku", "pos", "current_container", "expected_container")
+               if k not in meta]
+    if missing:
+        return None, f"metadata incompleta, faltan claves: {missing}"
+    return meta, None
 
 if __name__ == "__main__":
     app = StockApp()

@@ -22,6 +22,8 @@ os.makedirs(DEFAULT_IMAGE_FOLDER, exist_ok=True)
 DEFAULT_CONFIG = {
     "speed_multiplier": 1.0,
     "paste_mode": "typing",
+    "typing_speed": 3,          # 1..4 (perfil de velocidad de Typing)
+    "safe_mode": False,         # Modo seguro (fuerza Portapapeles Ultra Safe)
     "auto_save_seconds": 15,
     "last_family": "AM-AO",
     "theme": "dark",
@@ -75,4 +77,3 @@ def save_config(config):
         print(f"Error al guardar config: {e}")
 
 current_config = load_config()
-

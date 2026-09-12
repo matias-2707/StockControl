@@ -1,24 +1,13 @@
 # PENDIENTES V8.0 — Guía permanente del proyecto
 
 > Documento vivo. Mantener actualizado: marcar `[x]` lo resuelto y `[ ]` lo pendiente.
-> Última actualización: 2026-09-11.
+> Última actualización: 2026-09-12.
 
 ---
 
 ## 🔴 Prioridad alta
 
-- [ ] **Investigar la aparición de la contraseña de pruebas en la PC del trabajo.**
-  Al pasar el programa a la PC del trabajo, apareció la contraseña usada durante las
-  pruebas. **NO asumir que está embebida en el EXE**: auditar de dónde provino
-  (¿`auth.json` copiado junto al build? ¿datos de usuario en la carpeta del proyecto?
-  ¿asset capturado por PyInstaller? ¿algún archivo de sesión/config?).
-  **Objetivo**: garantizar que el proceso de build produzca una **instalación limpia**,
-  sin `auth.json`, `license.dat`, claves, datos de usuario ni credenciales.
-  Entregable: informe con causa raíz + verificación de que el build/dist queda limpio.
-
-- [ ] **Auditar la columna Cantidad en Cajas / Muebles / Vidrieras.**
-  Revisar el cálculo/mostrado de la columna Cantidad en esas vistas.
-  (Etapa siguiente; **primero auditar, luego decidir cambios**.)
+_(Sin pendientes de alta prioridad abiertos al 2026-09-12.)_
 
 ## 🟡 Prioridad media / mejoras conocidas
 
@@ -33,8 +22,34 @@
   entornos sin sesión gráfica (y probablemente también en la real). Pre-existente.
   Nota: el `--deselect` requiere el nodeid con **barras normales** para matchear.
 
+## 🟢 Baja prioridad / cobertura preventiva
+
+- [ ] **Ampliar `test_project_integrity` para verificar explícitamente que `auth.json` y
+  `runtime_state.json` no aparezcan dentro del árbol del proyecto/build distribuible.**
+  Mejora de cobertura **preventiva**: hoy los tests verifican que no haya clave privada
+  ni `license.dat` en el árbol, pero no cubren `auth.json`/`runtime_state.json`.
+  **NO es un problema actual** (el build limpio ya fue verificado y no arrastra esos
+  archivos); solo se agrega la verificación automatizada para prevenir regresiones.
+
 ## 🟢 Resueltos
 
+- [x] **Aparición de la contraseña de pruebas en la PC del trabajo.** Cerrado 2026-09-12.
+  **Causa raíz: operativa.** La contraseña **NO estaba en el EXE** ni en el **paquete
+  distribuido**; el **build limpio fue verificado** y **no arrastra credenciales ni
+  configuración de usuario**. Lo que ocurrió fue que se copió **completa** la carpeta
+  `%LOCALAPPDATA%\StockCellularCenter` desde la máquina de desarrollo a la PC del
+  trabajo; esa carpeta contenía `auth.json`, por lo que se trasladó la credencial de la
+  instalación de prueba. Al eliminar la carpeta y dejar que la aplicación la recreara,
+  solicitó correctamente una **nueva contraseña**.
+  **Regla de despliegue:** para una instalación nueva solo debe distribuirse el
+  **paquete de la aplicación** y colocarse la **licencia** correspondiente;
+  **NO copiar `%LOCALAPPDATA%\StockCellularCenter` desde otra máquina.**
+- [x] **Auditar la columna Cantidad en Cajas / Muebles / Vidrieras.** Cerrado 2026-09-12.
+  Resultado: **COMPORTAMIENTO ESPERADO**. La columna muestra faltantes respecto de las
+  expectativas cargadas en `main_stock.json`; si no existe expectativa, queda vacía por
+  diseño. No existe generación automática de expectativas desde el CSV; Cajas, Muebles y
+  Vidrieras usan la misma lógica. Las optimizaciones de F4/Delete/caché no son
+  responsables. No se implementó ningún cambio.
 - [x] **Motor de exportación V8.0** (TYPING rápido + CLIPBOARD modo seguro). Cerrado 2026-09-10.
 - [x] **Sistema de licencias asimétricas Ed25519** (clave pública embebida, privada fuera del repo).
 - [x] **Login local con PBKDF2 + salt** (sin contraseñas hardcodeadas).
@@ -51,3 +66,6 @@
   build, ni a logs, ni se copia/mueve.
 - [x] **La autoridad de firma vive en el perfil de `matia`** (el propietario); no forma
   parte del build ni del runtime del cliente.
+- [x] **Despliegue limpio:** para una instalación nueva distribuir solo el paquete de la
+  aplicación + la licencia. **NO copiar `%LOCALAPPDATA%\StockCellularCenter`** de otra
+  máquina (arrastra `auth.json`, `license.dat`, `config.json` y `runtime_state.json`).

@@ -299,7 +299,7 @@ class AuthManager:
 
             if self.setup_initial_password(p1):
                 result[0] = True
-                messagebox.showinfo("Configuración Completada", "Contraseña configurada exitosamente.")
+                messagebox.showinfo("Configuración Completada", "Contraseña configurada exitosamente.", parent=win)
                 win.destroy()
             else:
                 error_label.configure(text="Error al guardar la contraseña")
@@ -417,7 +417,7 @@ class AuthManager:
                     lbl_status.configure(text=f"Error: {message}", text_color="#e74c3c")
                     return
 
-                messagebox.showinfo("Éxito", message)
+                messagebox.showinfo("Éxito", message, parent=win)
                 result[0] = True
                 win.destroy()
 

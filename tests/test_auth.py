@@ -160,5 +160,44 @@ class TestAuthAndLicense(unittest.TestCase):
         self.assertTrue(os.path.exists(self.auth.license_file))
         self.assertTrue(self.auth.check_license())
 
+    def test_setup_success_message_is_parented_to_modal(self):
+        """El mensaje de exito al configurar la contrasena debe colgar del modal (parent=win).
+
+        Regresion: sin parent, el showinfo quedaba detras del CTkToplevel -topmost.
+        Se ejecuta headless mockeando customtkinter (mismo patron de mocks del archivo).
+        """
+        with patch('src.core.auth.ctk') as mock_ctk, \
+             patch('src.core.auth.center_window'):
+            win = mock_ctk.CTkToplevel.return_value
+            mock_ctk.CTkEntry.return_value.get.return_value = "SecretPass123"
+
+            self.auth.show_initial_setup_window()
+
+            on_save = mock_ctk.CTkButton.call_args.kwargs["command"]
+            on_save()
+
+            self.mock_info.assert_called_once()
+            _, kwargs = self.mock_info.call_args
+            self.assertIs(kwargs.get("parent"), win)
+
+    def test_renewal_success_message_is_parented_to_modal(self):
+        """El mensaje de exito al renovar licencia debe colgar del modal (parent=win)."""
+        lic_path = self._create_signed_license(days=30)
+
+        with patch('src.core.auth.ctk') as mock_ctk, \
+             patch('src.core.auth.center_window'), \
+             patch('src.core.auth.filedialog') as mock_fd:
+            mock_fd.askopenfilename.return_value = lic_path
+            win = mock_ctk.CTkToplevel.return_value
+
+            self.auth.show_renewal_window()
+
+            import_file = mock_ctk.CTkButton.call_args_list[0].kwargs["command"]
+            import_file()
+
+            self.mock_info.assert_called_once()
+            _, kwargs = self.mock_info.call_args
+            self.assertIs(kwargs.get("parent"), win)
+
 if __name__ == "__main__":
     unittest.main()

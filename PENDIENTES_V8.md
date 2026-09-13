@@ -9,6 +9,52 @@
 
 _(Sin pendientes de alta prioridad abiertos al 2026-09-12.)_
 
+## 🔴 Correcciones UX conocidas
+
+- [ ] **Unificar la selección del modo de exportación en una única opción clara.**
+  En la ventana de opciones de exportación aparecen hoy **dos controles que representan
+  el mismo modo**: un radio/botón relacionado con "Copiado y pegado" y un checkbox
+  "Modo seguro". Esto genera una opción duplicada/confusa.
+  **Semántica deseada (dos modos, una única fuente de verdad):**
+  - `Tecleo — rápido`
+  - `Portapapeles — seguro`
+  La velocidad de exportación corresponde **únicamente** al modo **Tecleo**.
+
+- [ ] **Bloquear completamente cualquier modificación de `typing_speed` mientras esté
+  activo Portapapeles / Modo Seguro.**
+  Hoy, aunque el control visual de velocidad se muestra deshabilitado en Modo Seguro, la
+  **rueda del mouse** todavía puede modificar `typing_speed`. No alcanza con deshabilitar
+  visualmente el widget: **la lógica debe impedir el cambio de estado**. Cubrir todos los
+  caminos:
+  - slider;
+  - rueda del mouse;
+  - teclado (si existe algún binding);
+  - cualquier otro camino que pueda modificar ese valor.
+
+## 🎨 Nueva etapa: Auditoría de UI/UX y estética
+
+- [ ] **Realizar auditoría visual y UX completa de Stock Cellular Center V8.0 y proponer
+  un plan de modernización.**
+  **NO modificar la interfaz todavía**: primero evaluación y recomendaciones.
+  **Objetivo:** la aplicación es funcional y técnicamente avanzada, pero la percepción
+  visual es demasiado básica. Evaluar cómo llevarla a un aspecto **moderno, profesional y
+  coherente** con una aplicación comercial de gestión de stock para Windows, siguiendo
+  buenas prácticas de diseño de escritorio.
+  **Áreas a evaluar:** jerarquía visual; tipografía; tamaños y pesos de texto; espaciado y
+  padding; alineación; colores; contraste; botones; controles; tablas; paneles; diálogos;
+  barra de estado; indicadores de progreso; estados de éxito/advertencia/error;
+  iconografía; consistencia entre ventanas; navegación; feedback tras escanear; feedback
+  durante exportaciones; mensajes y toasts; estados deshabilitados; comportamiento visual
+  de controles; uso del espacio; densidad de información. Animaciones/transiciones **solo
+  si aportan feedback o comprensión** (no decorativas).
+  **Prioridad:** 1) claridad; 2) velocidad de uso; 3) legibilidad; 4) consistencia;
+  5) apariencia profesional; 6) animaciones solo si aportan.
+  **Entregable previo a implementar:** problemas visuales detectados; recomendaciones;
+  prioridades; ejemplos concretos por área; propuesta de lenguaje visual general; qué NO
+  conviene cambiar; y plan de implementación por etapas.
+  **Enfoque buscado:** moderno + limpio + profesional + rápido + funcional. NO una app
+  "llamativa" ni recargada.
+
 ## 🟡 Prioridad media / mejoras conocidas
 
 - [ ] **Silenciar la clave pública en el modo headless del generador.**
